@@ -15,12 +15,12 @@ When the `tree_fs` instance is dropped, the temporary folder and its contents ar
 ```rust
 use temp_dir_builder::TempDirectoryBuilder;
 let temp_dir = TempDirectoryBuilder::default()
-    .add_text("test/foo.txt", "bar")
+    .add_text_file("test/foo.txt", "bar")
     .add_empty_file("test/folder-a/folder-b/bar.txt")
     .add_file("test/file.rs", file!())
     .add_directory("test/dir")
     .create()
-    .expect("create tree fs");
+    .expect("create temp dir");
 println!("created successfully in {}", temp_dir.path().display());
 ```
 <!-- </snip> -->

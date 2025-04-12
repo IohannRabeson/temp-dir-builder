@@ -14,7 +14,7 @@ use rand::{distributions::Alphanumeric, thread_rng, Rng};
 #[derive(Debug)]
 pub struct TempDirectory {
     path: PathBuf,
-    delete_directory_on_drop: bool,
+    delete_on_drop: bool,
 }
 
 impl TempDirectory {
@@ -25,12 +25,15 @@ impl TempDirectory {
     }
 }
 
+/// Error happening when creating the directory tree.
 #[derive(Debug, thiserror::Error)]
 pub enum CreateError {
     #[error("Failed to create the root directory '{0}': {1}")]
     FailedToCreateRootDirectory(PathBuf, std::io::Error),
     #[error("Failed to create directory '{0}': {1}")]
     FailedToCreateDirectory(PathBuf, std::io::Error),
+    #[error("Failed to delete directory '{0}': {1}")]
+    FailedToDeleteDirectory(PathBuf, std::io::Error),
     #[error("Failed to create file '{0}': {1}")]
     FailedToCreateFile(PathBuf, std::io::Error),
     #[error("Failed to read source file '{0}': {1}")]
@@ -38,10 +41,12 @@ pub enum CreateError {
     #[error("Failed to write file '{0}': {1}")]
     FailedToWriteFile(PathBuf, std::io::Error),
     #[error("The entry '{0}' is outside the temporary directory")]
-    PathOutsideDirectory(PathBuf),
+    EntryOutsideDirectory(PathBuf),
+    #[error("The entry '{0}' is already existing")]
+    DuplicateEntry(PathBuf),
 }
 
-/// A temporary directory builder that contains a list of files to be added.
+/// A temporary directory builder that contains a list of entries to be created.
 ///
 /// # Examples
 ///
@@ -49,12 +54,12 @@ pub enum CreateError {
 // <snip id="example-builder">
 /// use temp_dir_builder::TempDirectoryBuilder;
 /// let temp_dir = TempDirectoryBuilder::default()
-///     .add_text("test/foo.txt", "bar")
+///     .add_text_file("test/foo.txt", "bar")
 ///     .add_empty_file("test/folder-a/folder-b/bar.txt")
 ///     .add_file("test/file.rs", file!())
 ///     .add_directory("test/dir")
 ///     .create()
-///     .expect("create tree fs");
+///     .expect("create temp dir");
 /// println!("created successfully in {}", temp_dir.path().display());
 // </snip>
 /// ```
@@ -62,12 +67,10 @@ pub enum CreateError {
 pub struct TempDirectoryBuilder {
     /// Root folder where the tree will be created.
     root: PathBuf,
-    /// Flag indicating whether existing files should be overridden.
-    override_file: bool,
     /// List of file metadata entries in the tree.
     entries: Vec<Entry>,
     /// Flag indicating whether the temporary directory created must be deleted when the instance is dropped.
-    drop: bool,
+    delete_on_drop: bool,
 }
 
 impl Default for TempDirectoryBuilder {
@@ -75,16 +78,15 @@ impl Default for TempDirectoryBuilder {
     fn default() -> Self {
         Self {
             entries: vec![],
-            override_file: false,
             root: random_temp_directory(),
-            drop: true,
+            delete_on_drop: true,
         }
     }
 }
 
 impl Drop for TempDirectory {
     fn drop(&mut self) {
-        if self.delete_directory_on_drop {
+        if self.delete_on_drop {
             let _ = std::fs::remove_dir_all(&self.path);
         }
     }
@@ -99,25 +101,15 @@ impl TempDirectoryBuilder {
         self
     }
 
-    /// Sets the `drop` flag, indicating whether to automatically delete the
-    /// temporary folder when the `TempDirectory` instance is dropped.  
+    /// Specifies whether to automatically delete the temporary folder when the `TempDirectory` instance is dropped.  
     /// By default this is value is set to `true`.
     #[must_use]
-    pub const fn drop(mut self, yes: bool) -> Self {
-        self.drop = yes;
+    pub const fn delete_on_drop(mut self, delete_on_drop: bool) -> Self {
+        self.delete_on_drop = delete_on_drop;
         self
     }
 
-    /// Sets the `override_file` flag, indicating whether existing files should
-    /// be overridden.  
-    /// By default this value is set to `false`.
-    #[must_use]
-    pub const fn override_file(mut self, yes: bool) -> Self {
-        self.override_file = yes;
-        self
-    }
-
-    /// Adds a file with any content.
+    /// Adds an entry.
     #[must_use]
     fn add(mut self, path: impl AsRef<Path>, kind: Kind) -> Self {
         self.entries.push(Entry {
@@ -139,17 +131,17 @@ impl TempDirectoryBuilder {
         self.add(path, Kind::Directory)
     }
 
-    /// Adds a file specifying a text content.
+    /// Adds a text file specifying the content.
     #[must_use]
     #[allow(clippy::needless_pass_by_value)]
-    pub fn add_text(self, path: impl AsRef<Path>, text: impl ToString) -> Self {
-        self.add(path, Kind::Text(text.to_string()))
+    pub fn add_text_file(self, path: impl AsRef<Path>, text: impl ToString) -> Self {
+        self.add(path, Kind::TextFile(text.to_string()))
     }
 
     /// Adds a file specifying a source file to be copied.
     #[must_use]
     pub fn add_file(self, path: impl AsRef<Path>, file: impl AsRef<Path>) -> Self {
-        self.add(path, Kind::File(file.as_ref().to_path_buf()))
+        self.add(path, Kind::FileToCopy(file.as_ref().to_path_buf()))
     }
 
     /// Creates the file tree by generating files and directories based on the
@@ -167,13 +159,13 @@ impl TempDirectoryBuilder {
 
         for entry in &self.entries {
             if entry.path.is_absolute() && !entry.path.starts_with(&self.root) {
-                return Err(CreateError::PathOutsideDirectory(entry.path.clone()));
+                return Err(CreateError::EntryOutsideDirectory(entry.path.clone()));
             }
 
             let entry_path = self.root.join(&entry.path);
 
-            if !self.override_file && entry_path.exists() {
-                continue;
+            if entry_path.exists() {
+                return Err(CreateError::DuplicateEntry(entry_path));
             }
 
             if let Some(parent_dir) = Path::new(&entry_path).parent() {
@@ -191,7 +183,7 @@ impl TempDirectoryBuilder {
                     File::create(&entry_path)
                         .map_err(|err| CreateError::FailedToCreateFile(entry_path, err))?;
                 }
-                Kind::Text(text) => {
+                Kind::TextFile(text) => {
                     let mut new_file = File::create(&entry_path)
                         .map_err(|err| CreateError::FailedToCreateFile(entry_path.clone(), err))?;
 
@@ -199,7 +191,7 @@ impl TempDirectoryBuilder {
                         .write_all(text.as_bytes())
                         .map_err(|err| CreateError::FailedToWriteFile(entry_path, err))?;
                 }
-                Kind::File(source_path) => {
+                Kind::FileToCopy(source_path) => {
                     std::fs::copy(source_path, &entry_path)
                         .map_err(|err| CreateError::FailedToCopyFile(source_path.clone(), err))?;
                 }
@@ -208,7 +200,7 @@ impl TempDirectoryBuilder {
 
         Ok(TempDirectory {
             path: self.root.clone(),
-            delete_directory_on_drop: self.drop,
+            delete_on_drop: self.delete_on_drop,
         })
     }
 }
@@ -233,16 +225,16 @@ fn random_temp_directory() -> PathBuf {
 enum Kind {
     Directory,
     EmptyFile,
-    Text(String),
-    File(PathBuf),
+    TextFile(String),
+    FileToCopy(PathBuf),
 }
 
 /// Represents an entry, file or directory, to be created.
 #[derive(Debug)]
 struct Entry {
-    /// Path of the file relative to the root folder.
+    /// Path of the entry relative to the root folder.
     path: PathBuf,
-    /// Optional content to be written to the file.
+    /// The kind of the entry
     kind: Kind,
 }
 
@@ -259,11 +251,11 @@ mod tests {
     }
 
     #[test]
-    fn test_add_text() {
+    fn test_add_text_file() {
         let expected_content = "bar";
         let entry_name = "foo.txt";
         let temp_dir = TempDirectoryBuilder::default()
-            .add_text(entry_name, expected_content)
+            .add_text_file(entry_name, expected_content)
             .create()
             .unwrap();
         let entry_path = temp_dir.path().join(entry_name);
@@ -343,7 +335,7 @@ mod tests {
         let builder = TempDirectoryBuilder::default().add_empty_file(path_outside_temp_dir);
         let error = builder.create().unwrap_err();
 
-        assert!(matches!(error, CreateError::PathOutsideDirectory(_)));
+        assert!(matches!(error, CreateError::EntryOutsideDirectory(_)));
     }
 
     #[test]
@@ -353,5 +345,15 @@ mod tests {
         let error = builder.create().unwrap_err();
 
         assert!(matches!(error, CreateError::FailedToCopyFile(..)));
+    }
+
+    #[test]
+    fn test_duplicated_entries() {
+        let builder = TempDirectoryBuilder::default()
+            .add_empty_file("foo")
+            .add_empty_file("foo");
+        let error = builder.create().unwrap_err();
+
+        assert!(matches!(error, CreateError::DuplicateEntry(..)));
     }
 }
