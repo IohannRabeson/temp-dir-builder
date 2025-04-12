@@ -15,6 +15,6 @@ fn main() {
     assert!(path.exists());
 
     drop(tree_fs);
-    
+
     assert!(!path.exists());
 }
