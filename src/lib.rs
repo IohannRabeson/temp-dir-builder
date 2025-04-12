@@ -18,6 +18,8 @@ pub struct Tree {
 }
 
 impl Tree {
+    #[must_use]
+    #[allow(clippy::missing_const_for_fn)]
     pub fn root(&self) -> &Path {
         &self.root
     }
@@ -145,6 +147,7 @@ impl TreeBuilder {
 
     /// Adds a file specifying a text content.
     #[must_use]
+    #[allow(clippy::needless_pass_by_value)]
     pub fn add_text<P: AsRef<Path>>(self, path: P, text: impl ToString) -> Self {
         self.add(path, Content::Text(text.to_string()))
     }
