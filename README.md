@@ -9,7 +9,7 @@ Oftentimes, testing scenarios involve interactions with the file system. `temp-d
 ## Usage
 
 With the builder API, you can define file paths and contents in a structured way. Here’s how to create a tree with the builder:
-When the `tree_fs` instance is dropped, the temporary folder and its contents are automatically deleted, which is particularly useful for tests that require a clean state.
+When the `temp_dir` instance is dropped, the temporary folder and its contents are automatically deleted, which is particularly useful for tests that require a clean state.
 
 <!-- <snip id="example-builder" inject_from="code" strip_prefix="/// " template="rust"> -->
 ```rust
