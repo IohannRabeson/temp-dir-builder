@@ -1,4 +1,4 @@
-# temp-dir-builder [![CI](https://github.com/IohannRabeson/temp-dir-builder/actions/workflows/ci.yml/badge.svg)](https://github.com/IohannRabeson/temp-dir-builder/actions/workflows/ci.yml)
+# temp-dir-builder [![Rust](https://github.com/IohannRabeson/temp-dir-builder/actions/workflows/rust.yml/badge.svg)](https://github.com/IohannRabeson/temp-dir-builder/actions/workflows/rust.yml)
 
 Oftentimes, testing scenarios involve interactions with the file system. `temp-dir-builder` provides a convenient solution for creating file system trees tailored to the needs of your tests. This library offers:
 
