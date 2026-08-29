@@ -7,6 +7,7 @@ authors = ["Elad Kaplan <kaplan.elad@gmail.com>", "Iohann Rabeson"]
 keywords = ["filesystem", "folders", "test"]
 license = "Apache-2.0"
 readme = "README.md"
+repository = "https://github.com/IohannRabeson/temp-dir-builder"
 
 [dependencies]
 path-clean = "1.0.1"
