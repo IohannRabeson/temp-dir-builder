@@ -10,7 +10,7 @@ readme = "README.md"
 
 [dependencies]
 path-clean = "1.0.1"
-rand = { version = "0.8.5" }
+rand = { version = "0.10.2" }
 thiserror = "2.0.12"
 
 [dev-dependencies]

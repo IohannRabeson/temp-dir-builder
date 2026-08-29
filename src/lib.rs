@@ -8,7 +8,7 @@ use std::{
 };
 
 use path_clean::PathClean;
-use rand::{distributions::Alphanumeric, thread_rng, Rng};
+use rand::{distr::Alphanumeric, rng, RngExt};
 
 /// Represents a temporary directory.  
 /// By default this temporary directory is deleted when this struct is dropped.
@@ -239,7 +239,7 @@ impl TempDirectoryBuilder {
 
 fn random_temp_directory() -> PathBuf {
     loop {
-        let random_string: String = thread_rng()
+        let random_string: String = rng()
             .sample_iter(&Alphanumeric)
             .take(5)
             .map(char::from)
