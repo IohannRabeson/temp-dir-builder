@@ -26,5 +26,20 @@ println!("created successfully in {}", temp_dir.path().display());
 ```
 <!-- </snip> -->
 
+Right after adding a file or a directory, you can configure its permissions before continuing the chain:
+
+<!-- <snip id="example-set-readonly" inject_from="code" strip_prefix="/// " template="rust"> -->
+```rust
+use temp_dir_builder::TempDirectoryBuilder;
+let temp_dir = TempDirectoryBuilder::default()
+    .add_text_file("test/foo.txt", "bar").set_readonly(true)
+    .add_directory("test/dir")
+    .build()
+    .expect("create temp dir");
+```
+<!-- </snip> -->
+
+`set_mode` is also available on Unix platforms to set the raw permission bits (e.g. `0o744`).
+
 ## Credits
 This is a fork of [tree-fs](https://github.com/kaplanelad/tree-fs) I heavily rewritten, original idea by Elad Kaplan.
