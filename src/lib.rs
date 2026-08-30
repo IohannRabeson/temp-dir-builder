@@ -10,7 +10,7 @@ use std::{
 use path_clean::PathClean;
 use rand::{distr::Alphanumeric, rng, RngExt};
 
-/// Represents a temporary directory.  
+/// Represents a temporary directory.\
 /// By default this temporary directory is deleted when this struct is dropped.
 #[derive(Debug)]
 pub struct TempDirectory {
@@ -97,7 +97,7 @@ impl Drop for TempDirectory {
 }
 
 impl TempDirectoryBuilder {
-    /// Sets the root folder where the tree will be created.  
+    /// Sets the root folder where the tree will be created.\
     /// By default this is the temporary directory path returned by `std::env::temp_dir()`.
     #[must_use]
     pub fn root_folder(mut self, dir: impl AsRef<Path>) -> Self {
@@ -105,7 +105,7 @@ impl TempDirectoryBuilder {
         self
     }
 
-    /// Specifies whether to automatically delete the temporary folder when the `TempDirectory` instance is dropped.  
+    /// Specifies whether to automatically delete the temporary folder when the `TempDirectory` instance is dropped.\
     /// By default this is value is set to `true`.
     #[must_use]
     pub const fn delete_on_drop(mut self, delete_on_drop: bool) -> Self {
@@ -376,7 +376,7 @@ mod tests {
 
         drop(temp_dir);
 
-        assert!(!temp_dir_path.exists())
+        assert!(!temp_dir_path.exists());
     }
 
     #[test]

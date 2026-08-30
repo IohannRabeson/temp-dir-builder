@@ -15,3 +15,12 @@ rand = { version = "0.10.2" }
 thiserror = "2.0.12"
 
 [dev-dependencies]
+
+[lints.rust]
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"

@@ -1,0 +1,26 @@
+name: Snipdoc
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Snipdoc check
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout the code
+      uses: actions/checkout@v7
+    - uses: dtolnay/rust-toolchain@stable
+    - name: Install snipdoc
+      run: cargo install snipdoc
+    - name: Check docs are in sync
+      run: snipdoc check
