@@ -38,4 +38,4 @@ jobs:
         token: ${{secrets.GITHUB_TOKEN}}
         all-features: true
         check-args: --tests
-        args: -- -D warnings
+        args: -D warnings
