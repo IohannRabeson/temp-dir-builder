@@ -124,7 +124,11 @@ impl TempDirectoryBuilder {
             #[cfg(unix)]
             mode: None,
         });
-        EntryBuilder(self)
+        let entry_index = self.entries.len() - 1;
+        EntryBuilder {
+            builder: self,
+            entry_index,
+        }
     }
 
     /// Adds an empty file.
@@ -258,7 +262,10 @@ impl TempDirectoryBuilder {
 // </snip>
 /// ```
 #[derive(Debug)]
-pub struct EntryBuilder(TempDirectoryBuilder);
+pub struct EntryBuilder {
+    builder: TempDirectoryBuilder,
+    entry_index: usize,
+}
 
 impl EntryBuilder {
     /// Sets whether the entry just added is read-only.
@@ -277,54 +284,51 @@ impl EntryBuilder {
     }
 
     fn last_entry_mut(&mut self) -> &mut Entry {
-        self.0
-            .entries
-            .last_mut()
-            .expect("an EntryBuilder is always created with at least one entry")
+        &mut self.builder.entries[self.entry_index]
     }
 
     /// Sets the root folder where the tree will be created.
     /// By default this is the temporary directory path returned by `std::env::temp_dir()`.
     #[must_use]
     pub fn root_folder(self, dir: impl AsRef<Path>) -> TempDirectoryBuilder {
-        self.0.root_folder(dir)
+        self.builder.root_folder(dir)
     }
 
     /// Specifies whether to automatically delete the temporary folder when the `TempDirectory` instance is dropped.
     /// By default this is value is set to `true`.
     #[must_use]
     pub fn delete_on_drop(self, delete_on_drop: bool) -> TempDirectoryBuilder {
-        self.0.delete_on_drop(delete_on_drop)
+        self.builder.delete_on_drop(delete_on_drop)
     }
 
     /// Adds an empty file.
     #[must_use]
-    pub fn add_empty_file<P: AsRef<Path>>(self, path: P) -> EntryBuilder {
-        self.0.add_empty_file(path)
+    pub fn add_empty_file<P: AsRef<Path>>(self, path: P) -> Self {
+        self.builder.add_empty_file(path)
     }
 
     /// Adds a directory.
     #[must_use]
-    pub fn add_directory(self, path: impl AsRef<Path>) -> EntryBuilder {
-        self.0.add_directory(path)
+    pub fn add_directory(self, path: impl AsRef<Path>) -> Self {
+        self.builder.add_directory(path)
     }
 
     /// Adds a text file specifying the content.
     #[must_use]
-    pub fn add_text_file(self, path: impl AsRef<Path>, text: impl ToString) -> EntryBuilder {
-        self.0.add_text_file(path, text)
+    pub fn add_text_file(self, path: impl AsRef<Path>, text: impl ToString) -> Self {
+        self.builder.add_text_file(path, text)
     }
 
     /// Adds a binary file specifying the content.
     #[must_use]
-    pub fn add_binary_file(self, path: impl AsRef<Path>, content: &[u8]) -> EntryBuilder {
-        self.0.add_binary_file(path, content)
+    pub fn add_binary_file(self, path: impl AsRef<Path>, content: &[u8]) -> Self {
+        self.builder.add_binary_file(path, content)
     }
 
     /// Adds a file specifying a source file to be copied.
     #[must_use]
-    pub fn add_file(self, path: impl AsRef<Path>, file: impl AsRef<Path>) -> EntryBuilder {
-        self.0.add_file(path, file)
+    pub fn add_file(self, path: impl AsRef<Path>, file: impl AsRef<Path>) -> Self {
+        self.builder.add_file(path, file)
     }
 
     /// Builds the file tree by generating files and directories based on the
@@ -333,7 +337,7 @@ impl EntryBuilder {
     /// # Errors
     /// A `BuildError` is returned in case of error.
     pub fn build(&self) -> Result<TempDirectory, BuildError> {
-        self.0.build()
+        self.builder.build()
     }
 }
 
