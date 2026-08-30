@@ -47,6 +47,8 @@ pub enum BuildError {
     EmptyEntryName(usize),
     #[error("The entry '{0}' is already existing")]
     DuplicateEntry(PathBuf),
+    #[error("Failed to set permissions on '{0}': {1}")]
+    FailedToSetPermissions(PathBuf, std::io::Error),
 }
 
 /// A temporary directory builder that contains a list of entries to be created.
@@ -114,19 +116,22 @@ impl TempDirectoryBuilder {
     }
 
     #[must_use]
-    fn add(mut self, path: impl AsRef<Path>, kind: Kind) -> Self {
+    fn add(mut self, path: impl AsRef<Path>, kind: Kind) -> EntryBuilder {
         self.entries.push(Entry {
             path: path.as_ref().to_path_buf(),
             kind,
+            readonly: None,
+            #[cfg(unix)]
+            mode: None,
         });
-        self
+        EntryBuilder(self)
     }
 
     /// Adds an empty file.
     /// * `path` - Path of the file to create. This path must be relative to the created directory. If the path is outside
     ///   the created directory (e.g: "../foo") the error `BuildError::EntryOutsideDirectory` will be returned.
     #[must_use]
-    pub fn add_empty_file<P: AsRef<Path>>(self, path: P) -> Self {
+    pub fn add_empty_file<P: AsRef<Path>>(self, path: P) -> EntryBuilder {
         self.add(path, Kind::EmptyFile)
     }
 
@@ -134,7 +139,7 @@ impl TempDirectoryBuilder {
     /// * `path` - Path of the directory to create. This path must be relative to the created directory.
     ///   If the path is outside the created directory (e.g: "../foo") the error `BuildError::EntryOutsideDirectory` will be returned.
     #[must_use]
-    pub fn add_directory(self, path: impl AsRef<Path>) -> Self {
+    pub fn add_directory(self, path: impl AsRef<Path>) -> EntryBuilder {
         self.add(path, Kind::Directory)
     }
 
@@ -144,7 +149,7 @@ impl TempDirectoryBuilder {
     /// * `text` - Text to be written in the new file created.
     #[must_use]
     #[allow(clippy::needless_pass_by_value)]
-    pub fn add_text_file(self, path: impl AsRef<Path>, text: impl ToString) -> Self {
+    pub fn add_text_file(self, path: impl AsRef<Path>, text: impl ToString) -> EntryBuilder {
         self.add(path, Kind::TextFile(text.to_string()))
     }
 
@@ -153,7 +158,7 @@ impl TempDirectoryBuilder {
     ///   If the path is outside the created directory (e.g: "../foo") the error `BuildError::EntryOutsideDirectory` will be returned.
     /// * `content` - The bytes to be written in the new file created.
     #[must_use]
-    pub fn add_binary_file(self, path: impl AsRef<Path>, content: &[u8]) -> Self {
+    pub fn add_binary_file(self, path: impl AsRef<Path>, content: &[u8]) -> EntryBuilder {
         self.add(path, Kind::BinaryFile(content.to_vec()))
     }
 
@@ -162,7 +167,7 @@ impl TempDirectoryBuilder {
     ///   If the path is outside the created directory (e.g: "../foo") the error `BuildError::EntryOutsideDirectory` will be returned.
     /// * `file` - Path of the file to be copied. This path must be absolute.
     #[must_use]
-    pub fn add_file(self, path: impl AsRef<Path>, file: impl AsRef<Path>) -> Self {
+    pub fn add_file(self, path: impl AsRef<Path>, file: impl AsRef<Path>) -> EntryBuilder {
         self.add(path, Kind::FileToCopy(file.as_ref().to_path_buf()))
     }
 
@@ -237,6 +242,101 @@ impl TempDirectoryBuilder {
     }
 }
 
+/// A builder returned after an entry is added, allowing permissions
+/// to be configured before continuing to build the tree.
+///
+/// # Examples
+///
+/// ```rust
+// <snip id="example-set-readonly">
+/// use temp_dir_builder::TempDirectoryBuilder;
+/// let temp_dir = TempDirectoryBuilder::default()
+///     .add_text_file("test/foo.txt", "bar").set_readonly(true)
+///     .add_directory("test/dir")
+///     .build()
+///     .expect("create temp dir");
+// </snip>
+/// ```
+#[derive(Debug)]
+pub struct EntryBuilder(TempDirectoryBuilder);
+
+impl EntryBuilder {
+    /// Sets whether the entry just added is read-only.
+    #[must_use]
+    pub fn set_readonly(mut self, readonly: bool) -> Self {
+        self.last_entry_mut().readonly = Some(readonly);
+        self
+    }
+
+    /// Sets the Unix permission bits of the entry just added, e.g. `0o744`.
+    #[cfg(unix)]
+    #[must_use]
+    pub fn set_mode(mut self, mode: u32) -> Self {
+        self.last_entry_mut().mode = Some(mode);
+        self
+    }
+
+    fn last_entry_mut(&mut self) -> &mut Entry {
+        self.0
+            .entries
+            .last_mut()
+            .expect("an EntryBuilder is always created with at least one entry")
+    }
+
+    /// Sets the root folder where the tree will be created.
+    /// By default this is the temporary directory path returned by `std::env::temp_dir()`.
+    #[must_use]
+    pub fn root_folder(self, dir: impl AsRef<Path>) -> TempDirectoryBuilder {
+        self.0.root_folder(dir)
+    }
+
+    /// Specifies whether to automatically delete the temporary folder when the `TempDirectory` instance is dropped.
+    /// By default this is value is set to `true`.
+    #[must_use]
+    pub fn delete_on_drop(self, delete_on_drop: bool) -> TempDirectoryBuilder {
+        self.0.delete_on_drop(delete_on_drop)
+    }
+
+    /// Adds an empty file.
+    #[must_use]
+    pub fn add_empty_file<P: AsRef<Path>>(self, path: P) -> EntryBuilder {
+        self.0.add_empty_file(path)
+    }
+
+    /// Adds a directory.
+    #[must_use]
+    pub fn add_directory(self, path: impl AsRef<Path>) -> EntryBuilder {
+        self.0.add_directory(path)
+    }
+
+    /// Adds a text file specifying the content.
+    #[must_use]
+    pub fn add_text_file(self, path: impl AsRef<Path>, text: impl ToString) -> EntryBuilder {
+        self.0.add_text_file(path, text)
+    }
+
+    /// Adds a binary file specifying the content.
+    #[must_use]
+    pub fn add_binary_file(self, path: impl AsRef<Path>, content: &[u8]) -> EntryBuilder {
+        self.0.add_binary_file(path, content)
+    }
+
+    /// Adds a file specifying a source file to be copied.
+    #[must_use]
+    pub fn add_file(self, path: impl AsRef<Path>, file: impl AsRef<Path>) -> EntryBuilder {
+        self.0.add_file(path, file)
+    }
+
+    /// Builds the file tree by generating files and directories based on the
+    /// list of `Entry`s.
+    ///
+    /// # Errors
+    /// A `BuildError` is returned in case of error.
+    pub fn build(&self) -> Result<TempDirectory, BuildError> {
+        self.0.build()
+    }
+}
+
 fn random_temp_directory() -> PathBuf {
     loop {
         let random_string: String = rng()
@@ -267,8 +367,13 @@ enum Kind {
 struct Entry {
     /// Path of the entry relative to the root folder.
     path: PathBuf,
-    /// The kind of the entry
+    /// The kind of the entry.
     kind: Kind,
+    /// Whether the entry must be made read-only.
+    readonly: Option<bool>,
+    /// The Unix permission bits to apply to the entry.
+    #[cfg(unix)]
+    mode: Option<u32>,
 }
 
 #[cfg(test)]

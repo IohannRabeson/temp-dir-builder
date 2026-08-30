@@ -3,6 +3,7 @@ use temp_dir_builder::TempDirectoryBuilder;
 fn main() {
     let temp_directory = TempDirectoryBuilder::default()
         .add_text_file("test/foo.txt", "bar")
+        .set_readonly(true)
         .add_empty_file("test/folder-a/folder-b/bar.txt")
         .add_file("test_file.rs", file!())
         .build()
