@@ -72,7 +72,7 @@ pub enum BuildError {
 #[derive(Debug)]
 pub struct TempDirectoryBuilder {
     /// Root folder where the tree will be created.
-    root: PathBuf,
+    root: Root,
     /// List of file metadata entries in the tree.
     entries: Vec<Entry>,
     /// Flag indicating whether the temporary directory created must be deleted when the instance is dropped.
@@ -84,10 +84,19 @@ impl Default for TempDirectoryBuilder {
     fn default() -> Self {
         Self {
             entries: vec![],
-            root: random_temp_directory(),
+            root: Root::Random,
             delete_on_drop: true,
         }
     }
+}
+
+/// Root folder where the tree will be created.
+#[derive(Debug)]
+enum Root {
+    /// A random temporary directory will be generated and atomically created during `build()`.
+    Random,
+    /// A fixed, caller-provided directory.
+    Fixed(PathBuf),
 }
 
 impl Drop for TempDirectory {
@@ -103,7 +112,7 @@ impl TempDirectoryBuilder {
     /// By default this is the temporary directory path returned by `std::env::temp_dir()`.
     #[must_use]
     pub fn root_folder(mut self, dir: impl AsRef<Path>) -> Self {
-        self.root = dir.as_ref().to_path_buf();
+        self.root = Root::Fixed(dir.as_ref().to_path_buf());
         self
     }
 
@@ -181,19 +190,22 @@ impl TempDirectoryBuilder {
     /// # Errors
     /// A `BuildError` is returned in case of error.
     pub fn build(&self) -> Result<TempDirectory, BuildError> {
-        if !self.root.exists() {
-            std::fs::create_dir_all(&self.root)
-                .map_err(|err| BuildError::FailedToCreateRootDirectory(self.root.clone(), err))?;
-        }
+        let root = match &self.root {
+            Root::Fixed(root) => {
+                create_or_validate_fixed_root(root)?;
+                root.clone()
+            }
+            Root::Random => create_random_temp_directory()?,
+        };
 
         for (entry_index, entry) in self.entries.iter().enumerate() {
             if entry.path.as_os_str().is_empty() {
                 return Err(BuildError::EmptyEntryName(entry_index));
             }
 
-            let entry_path = self.root.join(&entry.path).clean();
+            let entry_path = root.join(&entry.path).clean();
 
-            if !entry_path.starts_with(&self.root) {
+            if !entry_path.starts_with(&root) {
                 return Err(BuildError::EntryOutsideDirectory(entry.path.clone()));
             }
 
@@ -240,7 +252,7 @@ impl TempDirectoryBuilder {
         }
 
         Ok(TempDirectory {
-            path: self.root.clone(),
+            path: root,
             delete_on_drop: self.delete_on_drop,
         })
     }
@@ -341,8 +353,63 @@ impl EntryBuilder {
     }
 }
 
-fn random_temp_directory() -> PathBuf {
-    loop {
+fn create_or_validate_fixed_root(root: &Path) -> Result<(), BuildError> {
+    match std::fs::create_dir(root) {
+        Ok(()) => return Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            if let Some(parent) = root.parent() {
+                std::fs::create_dir_all(parent).map_err(|err| {
+                    BuildError::FailedToCreateRootDirectory(root.to_path_buf(), err)
+                })?;
+            }
+
+            match std::fs::create_dir(root) {
+                Ok(()) => return Ok(()),
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(err) => {
+                    return Err(BuildError::FailedToCreateRootDirectory(
+                        root.to_path_buf(),
+                        err,
+                    ))
+                }
+            }
+        }
+        Err(err) => {
+            return Err(BuildError::FailedToCreateRootDirectory(
+                root.to_path_buf(),
+                err,
+            ))
+        }
+    }
+
+    // Residual TOCTOU: root could be swapped for a symlink between this check and later use, see issue #16.
+    match std::fs::symlink_metadata(root) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            Err(BuildError::FailedToCreateRootDirectory(
+                root.to_path_buf(),
+                std::io::Error::new(std::io::ErrorKind::AlreadyExists, "root path is a symlink"),
+            ))
+        }
+        Ok(metadata) if !metadata.is_dir() => Err(BuildError::FailedToCreateRootDirectory(
+            root.to_path_buf(),
+            std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "root path exists and is not a directory",
+            ),
+        )),
+        Ok(_) => Ok(()),
+        Err(err) => Err(BuildError::FailedToCreateRootDirectory(
+            root.to_path_buf(),
+            err,
+        )),
+    }
+}
+
+const MAX_RANDOM_DIRECTORY_ATTEMPTS: u32 = 100;
+
+fn create_random_temp_directory() -> Result<PathBuf, BuildError> {
+    for _ in 0..MAX_RANDOM_DIRECTORY_ATTEMPTS {
         let random_string: String = rng()
             .sample_iter(&Alphanumeric)
             .take(5)
@@ -351,10 +418,20 @@ fn random_temp_directory() -> PathBuf {
 
         let path = env::temp_dir().join(random_string);
 
-        if !path.exists() {
-            return path;
+        match std::fs::create_dir(&path) {
+            Ok(()) => return Ok(path),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(err) => return Err(BuildError::FailedToCreateRootDirectory(path, err)),
         }
     }
+
+    Err(BuildError::FailedToCreateRootDirectory(
+        env::temp_dir(),
+        std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "exhausted attempts to generate an unused random directory name",
+        ),
+    ))
 }
 
 #[derive(Debug)]
