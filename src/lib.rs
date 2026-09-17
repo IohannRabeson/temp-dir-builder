@@ -8,7 +8,7 @@ use std::{
 };
 
 use path_clean::PathClean;
-use rand::{distr::Alphanumeric, rng, RngExt};
+use rand::{RngExt, distr::Alphanumeric, rng};
 
 /// Represents a temporary directory.\
 /// By default this temporary directory is deleted when this struct is dropped.
@@ -161,9 +161,8 @@ impl TempDirectoryBuilder {
     ///   If the path is outside the created directory (e.g: "../foo") the error `BuildError::EntryOutsideDirectory` will be returned.
     /// * `text` - Text to be written in the new file created.
     #[must_use]
-    #[allow(clippy::needless_pass_by_value)]
-    pub fn add_text_file(self, path: impl AsRef<Path>, text: impl ToString) -> EntryBuilder {
-        self.add(path, Kind::TextFile(text.to_string()))
+    pub fn add_text_file(self, path: impl AsRef<Path>, text: impl Into<String>) -> EntryBuilder {
+        self.add(path, Kind::TextFile(text.into()))
     }
 
     /// Adds a binary file specifying the content.
@@ -327,7 +326,7 @@ impl EntryBuilder {
 
     /// Adds a text file specifying the content.
     #[must_use]
-    pub fn add_text_file(self, path: impl AsRef<Path>, text: impl ToString) -> Self {
+    pub fn add_text_file(self, path: impl AsRef<Path>, text: impl Into<String>) -> Self {
         self.builder.add_text_file(path, text)
     }
 
@@ -371,7 +370,7 @@ fn create_or_validate_fixed_root(root: &Path) -> Result<(), BuildError> {
                     return Err(BuildError::FailedToCreateRootDirectory(
                         root.to_path_buf(),
                         err,
-                    ))
+                    ));
                 }
             }
         }
@@ -379,7 +378,7 @@ fn create_or_validate_fixed_root(root: &Path) -> Result<(), BuildError> {
             return Err(BuildError::FailedToCreateRootDirectory(
                 root.to_path_buf(),
                 err,
-            ))
+            ));
         }
     }
 
