@@ -272,6 +272,22 @@ impl TempDirectoryBuilder {
 ///     .expect("create temp dir");
 // </snip>
 /// ```
+///
+/// On Unix platforms, `set_mode` can be used to set the raw permission bits:
+///
+/// ```rust
+// <snip id="example-set-mode">
+/// # #[cfg(unix)]
+/// # {
+/// use temp_dir_builder::TempDirectoryBuilder;
+/// let temp_dir = TempDirectoryBuilder::default()
+///     .add_text_file("test/foo.txt", "bar").set_mode(0o744)
+///     .add_directory("test/dir")
+///     .build()
+///     .expect("create temp dir");
+/// # }
+// </snip>
+/// ```
 #[derive(Debug)]
 pub struct EntryBuilder {
     builder: TempDirectoryBuilder,
