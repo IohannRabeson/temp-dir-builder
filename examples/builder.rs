@@ -1,3 +1,10 @@
+#![allow(
+    clippy::pedantic,
+    clippy::nursery,
+    clippy::unwrap_used,
+    clippy::expect_used
+)]
+
 use temp_dir_builder::TempDirectoryBuilder;
 
 fn main() {
