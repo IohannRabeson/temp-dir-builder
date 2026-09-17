@@ -8,7 +8,7 @@ use std::{
 };
 
 use path_clean::PathClean;
-use rand::{distr::Alphanumeric, rng, RngExt};
+use rand::{RngExt, distr::Alphanumeric, rng};
 
 /// Represents a temporary directory.\
 /// By default this temporary directory is deleted when this struct is dropped.
@@ -371,7 +371,7 @@ fn create_or_validate_fixed_root(root: &Path) -> Result<(), BuildError> {
                     return Err(BuildError::FailedToCreateRootDirectory(
                         root.to_path_buf(),
                         err,
-                    ))
+                    ));
                 }
             }
         }
@@ -379,7 +379,7 @@ fn create_or_validate_fixed_root(root: &Path) -> Result<(), BuildError> {
             return Err(BuildError::FailedToCreateRootDirectory(
                 root.to_path_buf(),
                 err,
-            ))
+            ));
         }
     }
 
