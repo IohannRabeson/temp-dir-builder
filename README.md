@@ -39,7 +39,21 @@ let temp_dir = TempDirectoryBuilder::default()
 ```
 <!-- </snip> -->
 
-`set_mode` is also available on Unix platforms to set the raw permission bits (e.g. `0o744`).
+On Unix platforms, `set_mode` can be used to set the raw permission bits:
+
+<!-- <snip id="example-set-mode" inject_from="code" strip_prefix="/// " template="rust"> -->
+```rust
+# #[cfg(unix)]
+# {
+use temp_dir_builder::TempDirectoryBuilder;
+let temp_dir = TempDirectoryBuilder::default()
+    .add_text_file("test/foo.txt", "bar").set_mode(0o744)
+    .add_directory("test/dir")
+    .build()
+    .expect("create temp dir");
+# }
+```
+<!-- </snip> -->
 
 ## Credits
 This is a fork of [tree-fs](https://github.com/kaplanelad/tree-fs) I heavily rewritten, original idea by Elad Kaplan.
