@@ -177,7 +177,7 @@ impl TempDirectoryBuilder {
     /// Adds a file specifying a source file to be copied.
     /// * `path` - Path of the file to create. This path must be relative to the created directory.
     ///   If the path is outside the created directory (e.g: "../foo") the error `BuildError::EntryOutsideDirectory` will be returned.
-    /// * `file` - Path of the file to be copied. This path must be absolute.
+    /// * `file` - Path of the file to be copied. If relative, it is resolved against the current working directory.
     #[must_use]
     pub fn add_file(self, path: impl AsRef<Path>, file: impl AsRef<Path>) -> EntryBuilder {
         self.add(path, Kind::FileToCopy(file.as_ref().to_path_buf()))
