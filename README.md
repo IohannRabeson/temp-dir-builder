@@ -42,4 +42,6 @@ let temp_dir = TempDirectoryBuilder::default()
 `set_mode` is also available on Unix platforms to set the raw permission bits (e.g. `0o744`).
 
 ## Credits
-This is a fork of [tree-fs](https://github.com/kaplanelad/tree-fs) I heavily rewritten, original idea by Elad Kaplan.
+This is a fork of [tree-fs](https://github.com/kaplanelad/tree-fs) I heavily rewritten, original idea by Elad Kaplan.  
+
+The reason I forked is that the layer allowing directory trees to be defined via YAML causes more issues than it fixes, because YAML lets you introduce errors that won't appear at compile time.
