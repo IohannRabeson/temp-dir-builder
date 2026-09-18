@@ -102,6 +102,7 @@ enum Root {
 impl Drop for TempDirectory {
     fn drop(&mut self) {
         if self.delete_on_drop {
+            make_deletable(&self.path);
             let _ = std::fs::remove_dir_all(&self.path);
         }
     }
@@ -197,6 +198,8 @@ impl TempDirectoryBuilder {
             Root::Random => create_random_temp_directory()?,
         };
 
+        let mut created_paths = Vec::with_capacity(self.entries.len());
+
         for (entry_index, entry) in self.entries.iter().enumerate() {
             if entry.path.as_os_str().is_empty() {
                 return Err(BuildError::EmptyEntryName(entry_index));
@@ -218,42 +221,130 @@ impl TempDirectoryBuilder {
                 })?;
             }
 
-            match &entry.kind {
-                Kind::Directory => {
-                    std::fs::create_dir(&entry_path)
-                        .map_err(|err| BuildError::FailedToCreateDirectory(entry_path, err))?;
-                }
-                Kind::EmptyFile => {
-                    File::create(&entry_path)
-                        .map_err(|err| BuildError::FailedToCreateFile(entry_path, err))?;
-                }
-                Kind::TextFile(text) => {
-                    let mut new_file = File::create(&entry_path)
-                        .map_err(|err| BuildError::FailedToCreateFile(entry_path.clone(), err))?;
+            create_entry(&entry_path, &entry.kind)?;
+            created_paths.push(entry_path);
+        }
 
-                    new_file
-                        .write_all(text.as_bytes())
-                        .map_err(|err| BuildError::FailedToWriteFile(entry_path, err))?;
-                }
-                Kind::BinaryFile(bytes) => {
-                    let mut new_file = File::create(&entry_path)
-                        .map_err(|err| BuildError::FailedToCreateFile(entry_path.clone(), err))?;
-
-                    new_file
-                        .write_all(bytes)
-                        .map_err(|err| BuildError::FailedToWriteFile(entry_path, err))?;
-                }
-                Kind::FileToCopy(source_path) => {
-                    std::fs::copy(source_path, &entry_path)
-                        .map_err(|err| BuildError::FailedToCopyFile(source_path.clone(), err))?;
-                }
-            }
+        for (entry, entry_path) in self.entries.iter().zip(created_paths) {
+            apply_permissions(&entry_path, entry)?;
         }
 
         Ok(TempDirectory {
             path: root,
             delete_on_drop: self.delete_on_drop,
         })
+    }
+}
+
+fn create_entry(entry_path: &Path, kind: &Kind) -> Result<(), BuildError> {
+    match kind {
+        Kind::Directory => {
+            std::fs::create_dir(entry_path).map_err(|err| {
+                BuildError::FailedToCreateDirectory(entry_path.to_path_buf(), err)
+            })?;
+        }
+        Kind::EmptyFile => {
+            File::create(entry_path)
+                .map_err(|err| BuildError::FailedToCreateFile(entry_path.to_path_buf(), err))?;
+        }
+        Kind::TextFile(text) => {
+            let mut new_file = File::create(entry_path)
+                .map_err(|err| BuildError::FailedToCreateFile(entry_path.to_path_buf(), err))?;
+
+            new_file
+                .write_all(text.as_bytes())
+                .map_err(|err| BuildError::FailedToWriteFile(entry_path.to_path_buf(), err))?;
+        }
+        Kind::BinaryFile(bytes) => {
+            let mut new_file = File::create(entry_path)
+                .map_err(|err| BuildError::FailedToCreateFile(entry_path.to_path_buf(), err))?;
+
+            new_file
+                .write_all(bytes)
+                .map_err(|err| BuildError::FailedToWriteFile(entry_path.to_path_buf(), err))?;
+        }
+        Kind::FileToCopy(source_path) => {
+            std::fs::copy(source_path, entry_path)
+                .map_err(|err| BuildError::FailedToCopyFile(source_path.clone(), err))?;
+        }
+    }
+
+    Ok(())
+}
+
+fn apply_permissions(entry_path: &Path, entry: &Entry) -> Result<(), BuildError> {
+    #[cfg(unix)]
+    let mode = entry.mode;
+    #[cfg(not(unix))]
+    let mode: Option<u32> = None;
+
+    if mode.is_none() && entry.readonly.is_none() {
+        return Ok(());
+    }
+
+    let mut permissions = std::fs::metadata(entry_path)
+        .map_err(|err| BuildError::FailedToSetPermissions(entry_path.to_path_buf(), err))?
+        .permissions();
+
+    #[cfg(unix)]
+    if let Some(mode) = mode {
+        use std::os::unix::fs::PermissionsExt;
+        permissions.set_mode(mode);
+    }
+
+    if let Some(readonly) = entry.readonly {
+        set_readonly(&mut permissions, readonly);
+    }
+
+    std::fs::set_permissions(entry_path, permissions)
+        .map_err(|err| BuildError::FailedToSetPermissions(entry_path.to_path_buf(), err))
+}
+
+fn set_readonly(permissions: &mut std::fs::Permissions, readonly: bool) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = permissions.mode();
+        permissions.set_mode(if readonly {
+            mode & !0o222
+        } else {
+            mode | 0o200
+        });
+    }
+    #[cfg(not(unix))]
+    permissions.set_readonly(readonly);
+}
+
+fn make_deletable(path: &Path) {
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return;
+    };
+    let file_type = metadata.file_type();
+
+    if file_type.is_symlink() {
+        return;
+    }
+
+    let mut permissions = metadata.permissions();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if !file_type.is_dir() {
+            return;
+        }
+        permissions.set_mode(permissions.mode() | 0o700);
+    }
+    #[cfg(not(unix))]
+    set_readonly(&mut permissions, false);
+
+    let _ = std::fs::set_permissions(path, permissions);
+
+    if file_type.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(path) {
+            for entry in entries.flatten() {
+                make_deletable(&entry.path());
+            }
+        }
     }
 }
 
@@ -622,5 +713,139 @@ mod tests {
         let error = builder.build().unwrap_err();
 
         assert!(matches!(error, BuildError::EmptyEntryName(0)));
+    }
+
+    #[test]
+    fn test_set_readonly_file() {
+        let temp_dir = TempDirectoryBuilder::default()
+            .add_text_file("readonly.txt", "foo")
+            .set_readonly(true)
+            .add_text_file("writable.txt", "bar")
+            .set_readonly(false)
+            .add_text_file("default.txt", "baz")
+            .build()
+            .unwrap();
+
+        let readonly_path = temp_dir.path().join("readonly.txt");
+        let writable_path = temp_dir.path().join("writable.txt");
+        let default_path = temp_dir.path().join("default.txt");
+
+        assert!(
+            std::fs::metadata(&readonly_path)
+                .unwrap()
+                .permissions()
+                .readonly()
+        );
+        assert!(
+            !std::fs::metadata(&writable_path)
+                .unwrap()
+                .permissions()
+                .readonly()
+        );
+        assert!(
+            !std::fs::metadata(&default_path)
+                .unwrap()
+                .permissions()
+                .readonly()
+        );
+        assert!(std::fs::write(&readonly_path, "changed").is_err());
+        assert!(std::fs::write(&writable_path, "changed").is_ok());
+    }
+
+    #[test]
+    fn test_set_readonly_directory() {
+        let temp_dir = TempDirectoryBuilder::default()
+            .add_directory("dir")
+            .set_readonly(true)
+            .add_text_file("dir/foo.txt", "foo")
+            .build()
+            .unwrap();
+
+        let dir_path = temp_dir.path().join("dir");
+
+        assert!(
+            std::fs::metadata(&dir_path)
+                .unwrap()
+                .permissions()
+                .readonly()
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir_path.join("foo.txt")).unwrap(),
+            "foo"
+        );
+    }
+
+    #[test]
+    fn test_readonly_entries_are_deleted_on_drop() {
+        let temp_dir = TempDirectoryBuilder::default()
+            .add_directory("dir")
+            .set_readonly(true)
+            .add_text_file("dir/foo.txt", "foo")
+            .set_readonly(true)
+            .add_directory("dir/nested")
+            .set_readonly(true)
+            .add_empty_file("dir/nested/bar.txt")
+            .set_readonly(true)
+            .build()
+            .unwrap();
+        let root = temp_dir.path().to_path_buf();
+
+        drop(temp_dir);
+
+        assert!(!root.exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_set_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = TempDirectoryBuilder::default()
+            .add_text_file("script.sh", "#!/bin/sh")
+            .set_mode(0o744)
+            .add_directory("dir")
+            .set_mode(0o500)
+            .add_empty_file("dir/foo.txt")
+            .build()
+            .unwrap();
+
+        let script_mode = std::fs::metadata(temp_dir.path().join("script.sh"))
+            .unwrap()
+            .permissions()
+            .mode();
+        let dir_mode = std::fs::metadata(temp_dir.path().join("dir"))
+            .unwrap()
+            .permissions()
+            .mode();
+
+        assert_eq!(script_mode & 0o777, 0o744);
+        assert_eq!(dir_mode & 0o777, 0o500);
+        assert!(temp_dir.path().join("dir/foo.txt").exists());
+
+        let root = temp_dir.path().to_path_buf();
+
+        drop(temp_dir);
+
+        assert!(!root.exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_set_mode_then_readonly() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = TempDirectoryBuilder::default()
+            .add_empty_file("foo")
+            .set_mode(0o766)
+            .set_readonly(true)
+            .build()
+            .unwrap();
+
+        let mode = std::fs::metadata(temp_dir.path().join("foo"))
+            .unwrap()
+            .permissions()
+            .mode();
+
+        assert_eq!(mode & 0o777, 0o544);
     }
 }
