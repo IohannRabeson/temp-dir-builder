@@ -187,6 +187,10 @@ impl TempDirectoryBuilder {
     /// Builds the file tree by generating files and directories based on the
     /// list of `Entry`s.
     ///
+    /// When no root folder was set, the returned `TempDirectory::path()` is canonical
+    /// (symlinks resolved), so it can be compared directly with paths reported by the
+    /// operating system.
+    ///
     /// # Errors
     /// A `BuildError` is returned in case of error.
     pub fn build(&self) -> Result<TempDirectory, BuildError> {
@@ -525,7 +529,11 @@ fn create_random_temp_directory() -> Result<PathBuf, BuildError> {
         let path = env::temp_dir().join(random_string);
 
         match std::fs::create_dir(&path) {
-            Ok(()) => return Ok(path),
+            Ok(()) => {
+                return path
+                    .canonicalize()
+                    .map_err(|err| BuildError::FailedToCreateRootDirectory(path, err));
+            }
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(err) => return Err(BuildError::FailedToCreateRootDirectory(path, err)),
         }
@@ -573,6 +581,17 @@ mod tests {
 
         assert!(temp_dir.path().exists());
         assert!(temp_dir.path().is_dir());
+    }
+
+    #[test]
+    fn test_random_root_is_canonical() {
+        let temp_dir = TempDirectoryBuilder::default()
+            .add_empty_file("foo")
+            .build()
+            .unwrap();
+
+        assert_eq!(temp_dir.path(), temp_dir.path().canonicalize().unwrap());
+        assert!(temp_dir.path().join("foo").exists());
     }
 
     #[test]
