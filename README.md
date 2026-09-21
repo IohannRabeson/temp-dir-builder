@@ -55,6 +55,21 @@ let temp_dir = TempDirectoryBuilder::default()
 ```
 <!-- </snip> -->
 
+A symbolic link can be added with `add_symlink`. A relative target is resolved
+against the root of the temporary directory:
+
+<!-- <snip id="example-add-symlink" inject_from="code" strip_prefix="    /// " template="rust"> -->
+```rust
+use temp_dir_builder::TempDirectoryBuilder;
+let temp_dir = TempDirectoryBuilder::default()
+    .add_text_file("data/file.txt", "content")
+    .add_symlink("link_to_data", "data")
+    .add_symlink("link_to_file", "data/file.txt")
+    .build()
+    .expect("create temp dir");
+```
+<!-- </snip> -->
+
 ## Credits
 This is a fork of [tree-fs](https://github.com/kaplanelad/tree-fs) I heavily rewritten, original idea by Elad Kaplan.  
 

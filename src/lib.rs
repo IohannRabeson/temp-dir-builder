@@ -49,6 +49,10 @@ pub enum BuildError {
     DuplicateEntry(PathBuf),
     #[error("Failed to set permissions on '{0}': {1}")]
     FailedToSetPermissions(PathBuf, std::io::Error),
+    #[error("Failed to create symlink '{0}': {1}")]
+    FailedToCreateSymlink(PathBuf, std::io::Error),
+    #[error("Cannot set permissions on symlink '{0}'")]
+    PermissionsOnSymlink(PathBuf),
 }
 
 /// A temporary directory builder that contains a list of entries to be created.
@@ -184,6 +188,66 @@ impl TempDirectoryBuilder {
         self.add(path, Kind::FileToCopy(file.as_ref().to_path_buf()))
     }
 
+    /// Adds a symbolic link.
+    ///
+    /// * `path` - Path of the link, relative to the root of the temporary directory.
+    /// * `target` - Target of the link. A relative target is resolved against the
+    ///   root of the temporary directory and written as an absolute path; an
+    ///   absolute target is written verbatim. The target does not have to exist,
+    ///   nor be inside the temporary directory.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    // <snip id="example-add-symlink">
+    /// use temp_dir_builder::TempDirectoryBuilder;
+    /// let temp_dir = TempDirectoryBuilder::default()
+    ///     .add_text_file("data/file.txt", "content")
+    ///     .add_symlink("link_to_data", "data")
+    ///     .add_symlink("link_to_file", "data/file.txt")
+    ///     .build()
+    ///     .expect("create temp dir");
+    // </snip>
+    /// ```
+    #[must_use]
+    pub fn add_symlink(self, path: impl AsRef<Path>, target: impl AsRef<Path>) -> EntryBuilder {
+        self.add(path, Kind::Symlink(target.as_ref().to_path_buf()))
+    }
+
+    /// Adds a symbolic link pointing at a target that doesn't exist yet,
+    /// explicitly created as a directory link.
+    ///
+    /// Only needed when `target` is dangling: `add_symlink` inspects an
+    /// existing target to pick file vs. directory automatically.
+    ///
+    /// # Errors
+    /// Creating symlinks on Windows requires developer mode or elevated
+    /// privileges.
+    #[cfg(windows)]
+    #[must_use]
+    pub fn add_symlink_dir(self, path: impl AsRef<Path>, target: impl AsRef<Path>) -> EntryBuilder {
+        self.add(path, Kind::SymlinkDir(target.as_ref().to_path_buf()))
+    }
+
+    /// Adds a symbolic link pointing at a target that doesn't exist yet,
+    /// explicitly created as a file link.
+    ///
+    /// Only needed when `target` is dangling: `add_symlink` inspects an
+    /// existing target to pick file vs. directory automatically.
+    ///
+    /// # Errors
+    /// Creating symlinks on Windows requires developer mode or elevated
+    /// privileges.
+    #[cfg(windows)]
+    #[must_use]
+    pub fn add_symlink_file(
+        self,
+        path: impl AsRef<Path>,
+        target: impl AsRef<Path>,
+    ) -> EntryBuilder {
+        self.add(path, Kind::SymlinkFile(target.as_ref().to_path_buf()))
+    }
+
     /// Builds the file tree by generating files and directories based on the
     /// list of `Entry`s.
     ///
@@ -216,7 +280,7 @@ impl TempDirectoryBuilder {
                 return Err(BuildError::EntryOutsideDirectory(entry.path.clone()));
             }
 
-            if entry_path.exists() {
+            if std::fs::symlink_metadata(&entry_path).is_ok() {
                 return Err(BuildError::DuplicateEntry(entry_path));
             }
 
@@ -226,7 +290,7 @@ impl TempDirectoryBuilder {
                 })?;
             }
 
-            create_entry(&entry_path, &entry.kind)?;
+            create_entry(&root, &entry_path, &entry.kind)?;
             created_paths.push(entry_path);
         }
 
@@ -241,7 +305,7 @@ impl TempDirectoryBuilder {
     }
 }
 
-fn create_entry(entry_path: &Path, kind: &Kind) -> Result<(), BuildError> {
+fn create_entry(root: &Path, entry_path: &Path, kind: &Kind) -> Result<(), BuildError> {
     match kind {
         Kind::Directory => {
             std::fs::create_dir(entry_path).map_err(|err| {
@@ -272,9 +336,56 @@ fn create_entry(entry_path: &Path, kind: &Kind) -> Result<(), BuildError> {
             std::fs::copy(source_path, entry_path)
                 .map_err(|err| BuildError::FailedToCopyFile(source_path.clone(), err))?;
         }
+        Kind::Symlink(target) => {
+            let target = resolve_symlink_target(root, target);
+            create_symlink(&target, entry_path)
+                .map_err(|err| BuildError::FailedToCreateSymlink(entry_path.to_path_buf(), err))?;
+        }
+        #[cfg(windows)]
+        Kind::SymlinkDir(target) => {
+            let target = resolve_symlink_target(root, target);
+            std::os::windows::fs::symlink_dir(&target, entry_path)
+                .map_err(|err| BuildError::FailedToCreateSymlink(entry_path.to_path_buf(), err))?;
+        }
+        #[cfg(windows)]
+        Kind::SymlinkFile(target) => {
+            let target = resolve_symlink_target(root, target);
+            std::os::windows::fs::symlink_file(&target, entry_path)
+                .map_err(|err| BuildError::FailedToCreateSymlink(entry_path.to_path_buf(), err))?;
+        }
     }
 
     Ok(())
+}
+
+fn resolve_symlink_target(root: &Path, target: &Path) -> PathBuf {
+    if target.is_absolute() {
+        target.to_path_buf()
+    } else {
+        root.join(target).clean()
+    }
+}
+
+#[cfg(unix)]
+fn create_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+#[cfg(windows)]
+fn create_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+    if target.is_dir() {
+        std::os::windows::fs::symlink_dir(target, link)
+    } else {
+        std::os::windows::fs::symlink_file(target, link)
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn create_symlink(_target: &Path, _link: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "symlinks are not supported on this platform",
+    ))
 }
 
 fn apply_permissions(entry_path: &Path, entry: &Entry) -> Result<(), BuildError> {
@@ -285,6 +396,10 @@ fn apply_permissions(entry_path: &Path, entry: &Entry) -> Result<(), BuildError>
 
     if mode.is_none() && entry.readonly.is_none() {
         return Ok(());
+    }
+
+    if entry.kind.is_symlink() {
+        return Err(BuildError::PermissionsOnSymlink(entry_path.to_path_buf()));
     }
 
     let mut permissions = std::fs::metadata(entry_path)
@@ -454,6 +569,28 @@ impl EntryBuilder {
         self.builder.add_file(path, file)
     }
 
+    /// Adds a symbolic link.
+    #[must_use]
+    pub fn add_symlink(self, path: impl AsRef<Path>, target: impl AsRef<Path>) -> Self {
+        self.builder.add_symlink(path, target)
+    }
+
+    /// Adds a symbolic link pointing at a target that doesn't exist yet,
+    /// explicitly created as a directory link.
+    #[cfg(windows)]
+    #[must_use]
+    pub fn add_symlink_dir(self, path: impl AsRef<Path>, target: impl AsRef<Path>) -> Self {
+        self.builder.add_symlink_dir(path, target)
+    }
+
+    /// Adds a symbolic link pointing at a target that doesn't exist yet,
+    /// explicitly created as a file link.
+    #[cfg(windows)]
+    #[must_use]
+    pub fn add_symlink_file(self, path: impl AsRef<Path>, target: impl AsRef<Path>) -> Self {
+        self.builder.add_symlink_file(path, target)
+    }
+
     /// Builds the file tree by generating files and directories based on the
     /// list of `Entry`s.
     ///
@@ -556,6 +693,22 @@ enum Kind {
     TextFile(String),
     BinaryFile(Vec<u8>),
     FileToCopy(PathBuf),
+    Symlink(PathBuf),
+    #[cfg(windows)]
+    SymlinkDir(PathBuf),
+    #[cfg(windows)]
+    SymlinkFile(PathBuf),
+}
+
+impl Kind {
+    const fn is_symlink(&self) -> bool {
+        match self {
+            Self::Symlink(_) => true,
+            #[cfg(windows)]
+            Self::SymlinkDir(_) | Self::SymlinkFile(_) => true,
+            _ => false,
+        }
+    }
 }
 
 /// Represents an entry, file or directory, to be created.
@@ -904,5 +1057,138 @@ mod tests {
             .mode();
 
         assert_eq!(mode & 0o777, 0o544);
+    }
+
+    #[test]
+    fn test_add_symlink_relative_target_resolves_to_absolute() {
+        let temp_dir = TempDirectoryBuilder::default()
+            .add_text_file("data/file.txt", "content")
+            .add_symlink("link_to_data", "data")
+            .build()
+            .unwrap();
+
+        let link_path = temp_dir.path().join("link_to_data");
+        let target = std::fs::read_link(&link_path).unwrap();
+
+        assert_eq!(target, temp_dir.path().join("data"));
+    }
+
+    #[test]
+    fn test_add_symlink_absolute_target_outside_root_is_not_removed() {
+        let outside = TempDirectoryBuilder::default()
+            .add_text_file("precious.txt", "precious data")
+            .build()
+            .unwrap();
+        let target_path = outside.path().join("precious.txt");
+
+        let temp_dir = TempDirectoryBuilder::default()
+            .add_symlink("link", &target_path)
+            .build()
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_link(temp_dir.path().join("link")).unwrap(),
+            target_path
+        );
+
+        drop(temp_dir);
+
+        assert!(target_path.exists());
+    }
+
+    #[test]
+    fn test_add_symlink_dangling_target() {
+        let temp_dir = TempDirectoryBuilder::default()
+            .add_symlink("link", "missing")
+            .build()
+            .unwrap();
+
+        let link_path = temp_dir.path().join("link");
+
+        assert!(std::fs::symlink_metadata(&link_path).is_ok());
+        assert!(!link_path.exists());
+    }
+
+    #[test]
+    fn test_add_symlink_with_permissions_fails() {
+        let builder = TempDirectoryBuilder::default()
+            .add_symlink("link", "data")
+            .set_readonly(true);
+        let error = builder.build().unwrap_err();
+
+        assert!(matches!(error, BuildError::PermissionsOnSymlink(_)));
+    }
+
+    #[test]
+    fn test_dropping_symlink_does_not_affect_readonly_target() {
+        let target_dir = TempDirectoryBuilder::default()
+            .add_text_file("readonly.txt", "foo")
+            .set_readonly(true)
+            .build()
+            .unwrap();
+        let readonly_file_path = target_dir.path().join("readonly.txt");
+
+        let temp_dir = TempDirectoryBuilder::default()
+            .add_symlink("link", target_dir.path())
+            .build()
+            .unwrap();
+
+        drop(temp_dir);
+
+        assert!(readonly_file_path.exists());
+        assert!(
+            std::fs::metadata(&readonly_file_path)
+                .unwrap()
+                .permissions()
+                .readonly()
+        );
+    }
+
+    #[test]
+    fn test_dangling_symlink_is_a_duplicate_entry() {
+        let temp_dir = TempDirectoryBuilder::default()
+            .add_symlink("link", "missing")
+            .delete_on_drop(false)
+            .build()
+            .unwrap();
+        let root = temp_dir.path().to_path_buf();
+        drop(temp_dir);
+
+        let builder = TempDirectoryBuilder::default()
+            .root_folder(&root)
+            .add_symlink("link", "other-missing");
+        let error = builder.build().unwrap_err();
+
+        std::fs::remove_dir_all(&root).unwrap();
+
+        assert!(matches!(error, BuildError::DuplicateEntry(_)));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_add_symlink_dir_windows() {
+        let temp_dir = TempDirectoryBuilder::default()
+            .add_symlink_dir("link", "missing")
+            .build()
+            .unwrap();
+
+        let link_path = temp_dir.path().join("link");
+        let metadata = std::fs::symlink_metadata(&link_path).unwrap();
+
+        assert!(metadata.file_type().is_symlink());
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_add_symlink_file_windows() {
+        let temp_dir = TempDirectoryBuilder::default()
+            .add_symlink_file("link", "missing")
+            .build()
+            .unwrap();
+
+        let link_path = temp_dir.path().join("link");
+        let metadata = std::fs::symlink_metadata(&link_path).unwrap();
+
+        assert!(metadata.file_type().is_symlink());
     }
 }
