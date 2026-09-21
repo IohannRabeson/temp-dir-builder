@@ -187,13 +187,18 @@ impl TempDirectoryBuilder {
     /// Builds the file tree by generating files and directories based on the
     /// list of `Entry`s.
     ///
+    /// The returned `TempDirectory::path()` is always canonical (symlinks
+    /// resolved), so it can be compared directly with paths reported by the
+    /// operating system.
+    ///
     /// # Errors
     /// A `BuildError` is returned in case of error.
     pub fn build(&self) -> Result<TempDirectory, BuildError> {
         let root = match &self.root {
             Root::Fixed(root) => {
                 create_or_validate_fixed_root(root)?;
-                root.clone()
+                root.canonicalize()
+                    .map_err(|err| BuildError::FailedToCreateRootDirectory(root.clone(), err))?
             }
             Root::Random => create_random_temp_directory()?,
         };
@@ -525,7 +530,11 @@ fn create_random_temp_directory() -> Result<PathBuf, BuildError> {
         let path = env::temp_dir().join(random_string);
 
         match std::fs::create_dir(&path) {
-            Ok(()) => return Ok(path),
+            Ok(()) => {
+                return path
+                    .canonicalize()
+                    .map_err(|err| BuildError::FailedToCreateRootDirectory(path, err));
+            }
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(err) => return Err(BuildError::FailedToCreateRootDirectory(path, err)),
         }
@@ -573,6 +582,54 @@ mod tests {
 
         assert!(temp_dir.path().exists());
         assert!(temp_dir.path().is_dir());
+    }
+
+    #[test]
+    fn test_random_root_is_canonical() {
+        let temp_dir = TempDirectoryBuilder::default()
+            .add_empty_file("foo")
+            .build()
+            .unwrap();
+
+        assert_eq!(temp_dir.path(), temp_dir.path().canonicalize().unwrap());
+        assert!(temp_dir.path().join("foo").exists());
+    }
+
+    #[test]
+    fn test_root_folder_relative_path_is_canonical() {
+        let dir_name = format!(
+            "test_root_folder_relative_path_is_canonical_{}",
+            std::process::id()
+        );
+        let temp_dir = TempDirectoryBuilder::default()
+            .root_folder(&dir_name)
+            .build()
+            .unwrap();
+
+        assert!(temp_dir.path().is_absolute());
+        assert_eq!(temp_dir.path(), temp_dir.path().canonicalize().unwrap());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_root_folder_under_symlinked_directory_is_canonical() {
+        let real_base = TempDirectoryBuilder::default().build().unwrap();
+        let link = std::env::temp_dir().join(format!(
+            "test_root_folder_under_symlinked_directory_is_canonical_{}",
+            std::process::id()
+        ));
+
+        std::os::unix::fs::symlink(real_base.path(), &link).unwrap();
+
+        let root = link.join("child");
+        let temp_dir = TempDirectoryBuilder::default()
+            .root_folder(&root)
+            .build()
+            .unwrap();
+
+        assert_eq!(temp_dir.path(), &real_base.path().join("child"));
+
+        std::fs::remove_file(&link).unwrap();
     }
 
     #[test]
