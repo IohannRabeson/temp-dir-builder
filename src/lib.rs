@@ -24,6 +24,46 @@ impl TempDirectory {
     pub fn path(&self) -> &Path {
         &self.path
     }
+
+    /// Joins `path` to the root of the temporary directory.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use temp_dir_builder::TempDirectoryBuilder;
+    /// let temp_dir = TempDirectoryBuilder::default()
+    ///     .add_text_file("foo.txt", "bar")
+    ///     .build()
+    ///     .expect("create temp dir");
+    /// let content = std::fs::read_to_string(temp_dir.join("foo.txt")).unwrap();
+    /// assert_eq!(content, "bar");
+    /// ```
+    #[must_use]
+    pub fn join(&self, path: impl AsRef<Path>) -> PathBuf {
+        self.path.join(path)
+    }
+
+    /// Returns an owned copy of the root path.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use temp_dir_builder::TempDirectoryBuilder;
+    /// let temp_dir = TempDirectoryBuilder::default()
+    ///     .build()
+    ///     .expect("create temp dir");
+    /// assert_eq!(temp_dir.to_path_buf(), temp_dir.path());
+    /// ```
+    #[must_use]
+    pub fn to_path_buf(&self) -> PathBuf {
+        self.path.clone()
+    }
+}
+
+impl AsRef<Path> for TempDirectory {
+    fn as_ref(&self) -> &Path {
+        &self.path
+    }
 }
 
 /// Error happening when creating the directory tree.
@@ -793,6 +833,31 @@ struct Entry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_join() {
+        let temp_dir = TempDirectoryBuilder::default().build().unwrap();
+
+        assert_eq!(temp_dir.join("a/b"), temp_dir.path().join("a/b"));
+    }
+
+    #[test]
+    fn test_to_path_buf() {
+        let temp_dir = TempDirectoryBuilder::default().build().unwrap();
+
+        assert_eq!(temp_dir.to_path_buf(), temp_dir.path());
+    }
+
+    #[test]
+    fn test_as_ref_path() {
+        fn accepts_path(path: impl AsRef<Path>) -> PathBuf {
+            path.as_ref().to_path_buf()
+        }
+
+        let temp_dir = TempDirectoryBuilder::default().build().unwrap();
+
+        assert_eq!(accepts_path(&temp_dir), temp_dir.path());
+    }
 
     #[test]
     fn test_temp_dir() {
