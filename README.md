@@ -55,6 +55,24 @@ let temp_dir = TempDirectoryBuilder::default()
 ```
 <!-- </snip> -->
 
+When a file's content needs to embed the root path of the temporary directory
+itself (a config file listing an absolute path, a script referring to a file
+next to itself), `add_text_file_with` computes the content from the root path
+at `build()` time:
+
+<!-- <snip id="example-add-text-file-with" inject_from="code" strip_prefix="    /// " template="rust"> -->
+```rust
+use temp_dir_builder::TempDirectoryBuilder;
+let temp_dir = TempDirectoryBuilder::default()
+    .add_text_file_with("config.toml", |root| {
+        format!("data_dir = {:?}", root.join("data"))
+    })
+    .add_directory("data")
+    .build()
+    .expect("create temp dir");
+```
+<!-- </snip> -->
+
 A symbolic link can be added with `add_symlink`. A relative target is resolved
 against the root of the temporary directory:
 
