@@ -179,6 +179,34 @@ impl TempDirectoryBuilder {
         self.add(path, Kind::BinaryFile(content.to_vec()))
     }
 
+    /// Adds a text file whose content is computed from the root path of the
+    /// temporary directory when `build()` runs.
+    /// * `path` - Path of the text file to create. This path must be relative to the created directory.
+    ///   If the path is outside the created directory (e.g: "../foo") the error `BuildError::EntryOutsideDirectory` will be returned.
+    /// * `content` - Called with the root path of the temporary directory to produce the text to be written in the new file created.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    // <snip id="example-add-text-file-with">
+    /// use temp_dir_builder::TempDirectoryBuilder;
+    /// let temp_dir = TempDirectoryBuilder::default()
+    ///     .add_text_file_with("config.toml", |root| {
+    ///         format!("data_dir = {:?}", root.join("data"))
+    ///     })
+    ///     .add_directory("data")
+    ///     .build()
+    ///     .expect("create temp dir");
+    // </snip>
+    /// ```
+    #[must_use]
+    pub fn add_text_file_with<F>(self, path: impl AsRef<Path>, content: F) -> EntryBuilder
+    where
+        F: Fn(&Path) -> String + 'static,
+    {
+        self.add(path, Kind::TextFileWith(Box::new(content)))
+    }
+
     /// Adds a file specifying a source file to be copied.
     /// * `path` - Path of the file to create. This path must be relative to the created directory.
     ///   If the path is outside the created directory (e.g: "../foo") the error `BuildError::EntryOutsideDirectory` will be returned.
@@ -317,6 +345,15 @@ fn create_entry(root: &Path, entry_path: &Path, kind: &Kind) -> Result<(), Build
                 .map_err(|err| BuildError::FailedToCreateFile(entry_path.to_path_buf(), err))?;
         }
         Kind::TextFile(text) => {
+            let mut new_file = File::create(entry_path)
+                .map_err(|err| BuildError::FailedToCreateFile(entry_path.to_path_buf(), err))?;
+
+            new_file
+                .write_all(text.as_bytes())
+                .map_err(|err| BuildError::FailedToWriteFile(entry_path.to_path_buf(), err))?;
+        }
+        Kind::TextFileWith(content) => {
+            let text = content(root);
             let mut new_file = File::create(entry_path)
                 .map_err(|err| BuildError::FailedToCreateFile(entry_path.to_path_buf(), err))?;
 
@@ -563,6 +600,16 @@ impl EntryBuilder {
         self.builder.add_binary_file(path, content)
     }
 
+    /// Adds a text file whose content is computed from the root path of the
+    /// temporary directory when `build()` runs.
+    #[must_use]
+    pub fn add_text_file_with<F>(self, path: impl AsRef<Path>, content: F) -> Self
+    where
+        F: Fn(&Path) -> String + 'static,
+    {
+        self.builder.add_text_file_with(path, content)
+    }
+
     /// Adds a file specifying a source file to be copied.
     #[must_use]
     pub fn add_file(self, path: impl AsRef<Path>, file: impl AsRef<Path>) -> Self {
@@ -686,11 +733,11 @@ fn create_random_temp_directory() -> Result<PathBuf, BuildError> {
     ))
 }
 
-#[derive(Debug)]
 enum Kind {
     Directory,
     EmptyFile,
     TextFile(String),
+    TextFileWith(Box<dyn Fn(&Path) -> String>),
     BinaryFile(Vec<u8>),
     FileToCopy(PathBuf),
     Symlink(PathBuf),
@@ -698,6 +745,24 @@ enum Kind {
     SymlinkDir(PathBuf),
     #[cfg(windows)]
     SymlinkFile(PathBuf),
+}
+
+impl std::fmt::Debug for Kind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Directory => f.write_str("Directory"),
+            Self::EmptyFile => f.write_str("EmptyFile"),
+            Self::TextFile(text) => f.debug_tuple("TextFile").field(text).finish(),
+            Self::TextFileWith(_) => f.write_str("TextFileWith(..)"),
+            Self::BinaryFile(bytes) => f.debug_tuple("BinaryFile").field(bytes).finish(),
+            Self::FileToCopy(path) => f.debug_tuple("FileToCopy").field(path).finish(),
+            Self::Symlink(path) => f.debug_tuple("Symlink").field(path).finish(),
+            #[cfg(windows)]
+            Self::SymlinkDir(path) => f.debug_tuple("SymlinkDir").field(path).finish(),
+            #[cfg(windows)]
+            Self::SymlinkFile(path) => f.debug_tuple("SymlinkFile").field(path).finish(),
+        }
+    }
 }
 
 impl Kind {
@@ -800,6 +865,59 @@ mod tests {
         let content = std::fs::read_to_string(entry_path).expect("read text in foo.txt");
 
         assert_eq!(content, expected_content);
+    }
+
+    #[test]
+    fn test_add_text_file_with() {
+        let entry_name = "foo.txt";
+        let temp_dir = TempDirectoryBuilder::default()
+            .add_text_file_with(entry_name, |root| format!("root is {}", root.display()))
+            .build()
+            .unwrap();
+        let entry_path = temp_dir.path().join(entry_name);
+
+        let content = std::fs::read_to_string(entry_path).expect("read text in foo.txt");
+
+        assert_eq!(content, format!("root is {}", temp_dir.path().display()));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_add_text_file_with_set_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let entry_name = "hook.sh";
+        let temp_dir = TempDirectoryBuilder::default()
+            .add_text_file_with(entry_name, |root| {
+                format!("#!/bin/sh\necho executed > {:?}\n", root.join("marker"))
+            })
+            .set_mode(0o755)
+            .build()
+            .unwrap();
+        let entry_path = temp_dir.path().join(entry_name);
+
+        let mode = std::fs::metadata(&entry_path).unwrap().permissions().mode();
+
+        assert_eq!(mode & 0o777, 0o755);
+    }
+
+    #[test]
+    fn test_add_text_file_with_duplicate_entry() {
+        let builder = TempDirectoryBuilder::default()
+            .add_text_file_with("foo", |_| String::new())
+            .add_text_file_with("foo", |_| String::new());
+        let error = builder.build().unwrap_err();
+
+        assert!(matches!(error, BuildError::DuplicateEntry(_)));
+    }
+
+    #[test]
+    fn test_add_text_file_with_outside_directory() {
+        let builder =
+            TempDirectoryBuilder::default().add_text_file_with("../foo", |_| String::new());
+        let error = builder.build().unwrap_err();
+
+        assert!(matches!(error, BuildError::EntryOutsideDirectory(_)));
     }
 
     #[test]
