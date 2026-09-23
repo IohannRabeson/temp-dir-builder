@@ -114,16 +114,16 @@ pub enum BuildError {
 // </snip>
 /// ```
 #[derive(Debug)]
-pub struct TempDirectoryBuilder {
+pub struct TempDirectoryBuilder<'a> {
     /// Root folder where the tree will be created.
     root: Root,
     /// List of file metadata entries in the tree.
-    entries: Vec<Entry>,
+    entries: Vec<Entry<'a>>,
     /// Flag indicating whether the temporary directory created must be deleted when the instance is dropped.
     delete_on_drop: bool,
 }
 
-impl Default for TempDirectoryBuilder {
+impl Default for TempDirectoryBuilder<'_> {
     /// Creates a default `TempDirectoryBuilder` instance with an empty file list,
     fn default() -> Self {
         Self {
@@ -152,7 +152,7 @@ impl Drop for TempDirectory {
     }
 }
 
-impl TempDirectoryBuilder {
+impl<'a> TempDirectoryBuilder<'a> {
     /// Sets the root folder where the tree will be created.\
     /// By default this is the temporary directory path returned by `std::env::temp_dir()`.
     #[must_use]
@@ -170,7 +170,7 @@ impl TempDirectoryBuilder {
     }
 
     #[must_use]
-    fn add(mut self, path: impl AsRef<Path>, kind: Kind) -> EntryBuilder {
+    fn add(mut self, path: impl AsRef<Path>, kind: Kind<'a>) -> EntryBuilder<'a> {
         self.entries.push(Entry {
             path: path.as_ref().to_path_buf(),
             kind,
@@ -189,7 +189,7 @@ impl TempDirectoryBuilder {
     /// * `path` - Path of the file to create. This path must be relative to the created directory. If the path is outside
     ///   the created directory (e.g: "../foo") the error `BuildError::EntryOutsideDirectory` will be returned.
     #[must_use]
-    pub fn add_empty_file<P: AsRef<Path>>(self, path: P) -> EntryBuilder {
+    pub fn add_empty_file<P: AsRef<Path>>(self, path: P) -> EntryBuilder<'a> {
         self.add(path, Kind::EmptyFile)
     }
 
@@ -197,7 +197,7 @@ impl TempDirectoryBuilder {
     /// * `path` - Path of the directory to create. This path must be relative to the created directory.
     ///   If the path is outside the created directory (e.g: "../foo") the error `BuildError::EntryOutsideDirectory` will be returned.
     #[must_use]
-    pub fn add_directory(self, path: impl AsRef<Path>) -> EntryBuilder {
+    pub fn add_directory(self, path: impl AsRef<Path>) -> EntryBuilder<'a> {
         self.add(path, Kind::Directory)
     }
 
@@ -206,7 +206,11 @@ impl TempDirectoryBuilder {
     ///   If the path is outside the created directory (e.g: "../foo") the error `BuildError::EntryOutsideDirectory` will be returned.
     /// * `text` - Text to be written in the new file created.
     #[must_use]
-    pub fn add_text_file(self, path: impl AsRef<Path>, text: impl Into<String>) -> EntryBuilder {
+    pub fn add_text_file(
+        self,
+        path: impl AsRef<Path>,
+        text: impl Into<String>,
+    ) -> EntryBuilder<'a> {
         self.add(path, Kind::TextFile(text.into()))
     }
 
@@ -215,7 +219,7 @@ impl TempDirectoryBuilder {
     ///   If the path is outside the created directory (e.g: "../foo") the error `BuildError::EntryOutsideDirectory` will be returned.
     /// * `content` - The bytes to be written in the new file created.
     #[must_use]
-    pub fn add_binary_file(self, path: impl AsRef<Path>, content: &[u8]) -> EntryBuilder {
+    pub fn add_binary_file(self, path: impl AsRef<Path>, content: &[u8]) -> EntryBuilder<'a> {
         self.add(path, Kind::BinaryFile(content.to_vec()))
     }
 
@@ -240,9 +244,9 @@ impl TempDirectoryBuilder {
     // </snip>
     /// ```
     #[must_use]
-    pub fn add_text_file_with<F>(self, path: impl AsRef<Path>, content: F) -> EntryBuilder
+    pub fn add_text_file_with<F>(self, path: impl AsRef<Path>, content: F) -> EntryBuilder<'a>
     where
-        F: Fn(&Path) -> String + 'static,
+        F: Fn(&Path) -> String + 'a,
     {
         self.add(path, Kind::TextFileWith(Box::new(content)))
     }
@@ -252,7 +256,7 @@ impl TempDirectoryBuilder {
     ///   If the path is outside the created directory (e.g: "../foo") the error `BuildError::EntryOutsideDirectory` will be returned.
     /// * `file` - Path of the file to be copied. If relative, it is resolved against the current working directory.
     #[must_use]
-    pub fn add_file(self, path: impl AsRef<Path>, file: impl AsRef<Path>) -> EntryBuilder {
+    pub fn add_file(self, path: impl AsRef<Path>, file: impl AsRef<Path>) -> EntryBuilder<'a> {
         self.add(path, Kind::FileToCopy(file.as_ref().to_path_buf()))
     }
 
@@ -278,7 +282,7 @@ impl TempDirectoryBuilder {
     // </snip>
     /// ```
     #[must_use]
-    pub fn add_symlink(self, path: impl AsRef<Path>, target: impl AsRef<Path>) -> EntryBuilder {
+    pub fn add_symlink(self, path: impl AsRef<Path>, target: impl AsRef<Path>) -> EntryBuilder<'a> {
         self.add(path, Kind::Symlink(target.as_ref().to_path_buf()))
     }
 
@@ -293,7 +297,11 @@ impl TempDirectoryBuilder {
     /// privileges.
     #[cfg(windows)]
     #[must_use]
-    pub fn add_symlink_dir(self, path: impl AsRef<Path>, target: impl AsRef<Path>) -> EntryBuilder {
+    pub fn add_symlink_dir(
+        self,
+        path: impl AsRef<Path>,
+        target: impl AsRef<Path>,
+    ) -> EntryBuilder<'a> {
         self.add(path, Kind::SymlinkDir(target.as_ref().to_path_buf()))
     }
 
@@ -312,7 +320,7 @@ impl TempDirectoryBuilder {
         self,
         path: impl AsRef<Path>,
         target: impl AsRef<Path>,
-    ) -> EntryBuilder {
+    ) -> EntryBuilder<'a> {
         self.add(path, Kind::SymlinkFile(target.as_ref().to_path_buf()))
     }
 
@@ -373,7 +381,7 @@ impl TempDirectoryBuilder {
     }
 }
 
-fn create_entry(root: &Path, entry_path: &Path, kind: &Kind) -> Result<(), BuildError> {
+fn create_entry(root: &Path, entry_path: &Path, kind: &Kind<'_>) -> Result<(), BuildError> {
     match kind {
         Kind::Directory => {
             std::fs::create_dir(entry_path).map_err(|err| {
@@ -465,7 +473,7 @@ fn create_symlink(_target: &Path, _link: &Path) -> std::io::Result<()> {
     ))
 }
 
-fn apply_permissions(entry_path: &Path, entry: &Entry) -> Result<(), BuildError> {
+fn apply_permissions(entry_path: &Path, entry: &Entry<'_>) -> Result<(), BuildError> {
     #[cfg(unix)]
     let mode = entry.mode;
     #[cfg(not(unix))]
@@ -577,12 +585,12 @@ fn make_deletable(path: &Path) {
 // </snip>
 /// ```
 #[derive(Debug)]
-pub struct EntryBuilder {
-    builder: TempDirectoryBuilder,
+pub struct EntryBuilder<'a> {
+    builder: TempDirectoryBuilder<'a>,
     entry_index: usize,
 }
 
-impl EntryBuilder {
+impl<'a> EntryBuilder<'a> {
     /// Sets whether the entry just added is read-only.
     #[must_use]
     pub fn set_readonly(mut self, readonly: bool) -> Self {
@@ -598,21 +606,21 @@ impl EntryBuilder {
         self
     }
 
-    fn last_entry_mut(&mut self) -> &mut Entry {
+    fn last_entry_mut(&mut self) -> &mut Entry<'a> {
         &mut self.builder.entries[self.entry_index]
     }
 
     /// Sets the root folder where the tree will be created.
     /// By default this is the temporary directory path returned by `std::env::temp_dir()`.
     #[must_use]
-    pub fn root_folder(self, dir: impl AsRef<Path>) -> TempDirectoryBuilder {
+    pub fn root_folder(self, dir: impl AsRef<Path>) -> TempDirectoryBuilder<'a> {
         self.builder.root_folder(dir)
     }
 
     /// Specifies whether to automatically delete the temporary folder when the `TempDirectory` instance is dropped.
     /// By default this is value is set to `true`.
     #[must_use]
-    pub fn delete_on_drop(self, delete_on_drop: bool) -> TempDirectoryBuilder {
+    pub fn delete_on_drop(self, delete_on_drop: bool) -> TempDirectoryBuilder<'a> {
         self.builder.delete_on_drop(delete_on_drop)
     }
 
@@ -645,7 +653,7 @@ impl EntryBuilder {
     #[must_use]
     pub fn add_text_file_with<F>(self, path: impl AsRef<Path>, content: F) -> Self
     where
-        F: Fn(&Path) -> String + 'static,
+        F: Fn(&Path) -> String + 'a,
     {
         self.builder.add_text_file_with(path, content)
     }
@@ -773,11 +781,11 @@ fn create_random_temp_directory() -> Result<PathBuf, BuildError> {
     ))
 }
 
-enum Kind {
+enum Kind<'a> {
     Directory,
     EmptyFile,
     TextFile(String),
-    TextFileWith(Box<dyn Fn(&Path) -> String>),
+    TextFileWith(Box<dyn Fn(&Path) -> String + 'a>),
     BinaryFile(Vec<u8>),
     FileToCopy(PathBuf),
     Symlink(PathBuf),
@@ -787,7 +795,7 @@ enum Kind {
     SymlinkFile(PathBuf),
 }
 
-impl std::fmt::Debug for Kind {
+impl std::fmt::Debug for Kind<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Directory => f.write_str("Directory"),
@@ -805,7 +813,7 @@ impl std::fmt::Debug for Kind {
     }
 }
 
-impl Kind {
+impl Kind<'_> {
     const fn is_symlink(&self) -> bool {
         match self {
             Self::Symlink(_) => true,
@@ -818,11 +826,11 @@ impl Kind {
 
 /// Represents an entry, file or directory, to be created.
 #[derive(Debug)]
-struct Entry {
+struct Entry<'a> {
     /// Path of the entry relative to the root folder.
     path: PathBuf,
     /// The kind of the entry.
-    kind: Kind,
+    kind: Kind<'a>,
     /// Whether the entry must be made read-only.
     readonly: Option<bool>,
     /// The Unix permission bits to apply to the entry.
@@ -944,6 +952,24 @@ mod tests {
         let content = std::fs::read_to_string(entry_path).expect("read text in foo.txt");
 
         assert_eq!(content, format!("root is {}", temp_dir.path().display()));
+    }
+
+    #[test]
+    fn test_add_text_file_with_borrowed_local() {
+        let entry_name = "foo.txt";
+        let template = String::from("root is");
+        let temp_dir = TempDirectoryBuilder::default()
+            .add_text_file_with(entry_name, |root| format!("{template} {}", root.display()))
+            .build()
+            .unwrap();
+        let entry_path = temp_dir.path().join(entry_name);
+
+        let content = std::fs::read_to_string(entry_path).expect("read text in foo.txt");
+
+        assert_eq!(
+            content,
+            format!("{template} {}", temp_dir.path().display())
+        );
     }
 
     #[test]
