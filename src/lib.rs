@@ -366,7 +366,7 @@ impl<'a> TempDirectoryBuilder<'a> {
         let root = match &self.root {
             Root::Fixed(root) => {
                 create_or_validate_fixed_root(root)?;
-                root.canonicalize()
+                canonicalize(root)
                     .map_err(|err| BuildError::FailedToCreateRootDirectory(root.clone(), err))?
             }
             Root::Random => create_random_temp_directory()?,
@@ -508,6 +508,16 @@ fn create_symlink(_target: &Path, _link: &Path) -> std::io::Result<()> {
         std::io::ErrorKind::Unsupported,
         "symlinks are not supported on this platform",
     ))
+}
+
+#[cfg(windows)]
+fn canonicalize(path: impl AsRef<Path>) -> std::io::Result<PathBuf> {
+    dunce::canonicalize(path)
+}
+
+#[cfg(not(windows))]
+fn canonicalize(path: impl AsRef<Path>) -> std::io::Result<PathBuf> {
+    path.as_ref().canonicalize()
 }
 
 fn apply_permissions(entry_path: &Path, entry: &Entry<'_>) -> Result<(), BuildError> {
@@ -807,8 +817,7 @@ fn create_random_temp_directory() -> Result<PathBuf, BuildError> {
 
         match std::fs::create_dir(&path) {
             Ok(()) => {
-                return path
-                    .canonicalize()
+                return canonicalize(&path)
                     .map_err(|err| BuildError::FailedToCreateRootDirectory(path, err));
             }
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
@@ -928,7 +937,7 @@ mod tests {
             .build()
             .unwrap();
 
-        assert_eq!(temp_dir.path(), temp_dir.path().canonicalize().unwrap());
+        assert_eq!(temp_dir.path(), canonicalize(&temp_dir).unwrap());
         assert!(temp_dir.path().join("foo").exists());
     }
 
@@ -944,7 +953,7 @@ mod tests {
             .unwrap();
 
         assert!(temp_dir.path().is_absolute());
-        assert_eq!(temp_dir.path(), temp_dir.path().canonicalize().unwrap());
+        assert_eq!(temp_dir.path(), canonicalize(&temp_dir).unwrap());
     }
 
     #[test]
@@ -1364,7 +1373,7 @@ mod tests {
             Path::new("../data")
         );
         assert_eq!(
-            std::fs::canonicalize(&link_path).unwrap(),
+            canonicalize(&link_path).unwrap(),
             temp_dir.path().join("data")
         );
     }
