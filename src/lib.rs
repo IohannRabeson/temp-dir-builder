@@ -1012,10 +1012,7 @@ mod tests {
 
         let content = std::fs::read_to_string(entry_path).expect("read text in foo.txt");
 
-        assert_eq!(
-            content,
-            format!("{template} {}", temp_dir.path().display())
-        );
+        assert_eq!(content, format!("{template} {}", temp_dir.path().display()));
     }
 
     #[test]
