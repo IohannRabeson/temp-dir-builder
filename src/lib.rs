@@ -461,13 +461,13 @@ fn create_entry(root: &Path, entry_path: &Path, kind: &Kind<'_>) -> Result<(), B
         }
         #[cfg(windows)]
         Kind::SymlinkDir(target) => {
-            let target = resolve_symlink_target(root, target);
+            let target = windows_reparse_target(&resolve_symlink_target(root, target));
             std::os::windows::fs::symlink_dir(&target, entry_path)
                 .map_err(|err| BuildError::FailedToCreateSymlink(entry_path.to_path_buf(), err))?;
         }
         #[cfg(windows)]
         Kind::SymlinkFile(target) => {
-            let target = resolve_symlink_target(root, target);
+            let target = windows_reparse_target(&resolve_symlink_target(root, target));
             std::os::windows::fs::symlink_file(&target, entry_path)
                 .map_err(|err| BuildError::FailedToCreateSymlink(entry_path.to_path_buf(), err))?;
         }
@@ -494,12 +494,24 @@ fn create_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
     let resolved_target = link
         .parent()
         .map_or_else(|| target.to_path_buf(), |parent| parent.join(target));
+    let target = windows_reparse_target(target);
 
     if resolved_target.is_dir() {
         std::os::windows::fs::symlink_dir(target, link)
     } else {
         std::os::windows::fs::symlink_file(target, link)
     }
+}
+
+/// Windows stores a symlink's target verbatim in the reparse point, and the
+/// kernel only accepts `\` as a separator there (unlike regular path APIs,
+/// which accept `/` too). Normalize before handing the target to
+/// `symlink_dir`/`symlink_file`, otherwise forward slashes in the target
+/// (e.g. from `add_relative_symlink("dir/link", "../data")`) make the link
+/// unreadable by anything that actually traverses it.
+#[cfg(windows)]
+fn windows_reparse_target(target: &Path) -> PathBuf {
+    PathBuf::from(target.to_string_lossy().replace('/', "\\"))
 }
 
 #[cfg(not(any(unix, windows)))]
