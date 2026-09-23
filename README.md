@@ -88,6 +88,20 @@ let temp_dir = TempDirectoryBuilder::default()
 ```
 <!-- </snip> -->
 
+`add_relative_symlink` writes the target verbatim instead, interpreted by the
+OS relative to the link's parent directory:
+
+<!-- <snip id="example-add-relative-symlink" inject_from="code" strip_prefix="    /// " template="rust"> -->
+```rust
+use temp_dir_builder::TempDirectoryBuilder;
+let temp_dir = TempDirectoryBuilder::default()
+    .add_text_file("data/file.txt", "content")
+    .add_relative_symlink("dir/link", "../data")
+    .build()
+    .expect("create temp dir");
+```
+<!-- </snip> -->
+
 ## Credits
 This is a fork of [tree-fs](https://github.com/kaplanelad/tree-fs) I heavily rewritten, original idea by Elad Kaplan.  
 

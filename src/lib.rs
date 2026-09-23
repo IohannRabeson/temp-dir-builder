@@ -266,7 +266,8 @@ impl<'a> TempDirectoryBuilder<'a> {
     /// * `target` - Target of the link. A relative target is resolved against the
     ///   root of the temporary directory and written as an absolute path; an
     ///   absolute target is written verbatim. The target does not have to exist,
-    ///   nor be inside the temporary directory.
+    ///   nor be inside the temporary directory. Use `add_relative_symlink` to
+    ///   write the target verbatim instead.
     ///
     /// # Examples
     ///
@@ -284,6 +285,34 @@ impl<'a> TempDirectoryBuilder<'a> {
     #[must_use]
     pub fn add_symlink(self, path: impl AsRef<Path>, target: impl AsRef<Path>) -> EntryBuilder<'a> {
         self.add(path, Kind::Symlink(target.as_ref().to_path_buf()))
+    }
+
+    /// Adds a symbolic link whose target is written verbatim, interpreted by
+    /// the OS relative to the link's parent directory.
+    ///
+    /// * `path` - Path of the link, relative to the root of the temporary directory.
+    /// * `target` - Target of the link, written as-is. The target does not have
+    ///   to exist, nor be inside the temporary directory.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    // <snip id="example-add-relative-symlink">
+    /// use temp_dir_builder::TempDirectoryBuilder;
+    /// let temp_dir = TempDirectoryBuilder::default()
+    ///     .add_text_file("data/file.txt", "content")
+    ///     .add_relative_symlink("dir/link", "../data")
+    ///     .build()
+    ///     .expect("create temp dir");
+    // </snip>
+    /// ```
+    #[must_use]
+    pub fn add_relative_symlink(
+        self,
+        path: impl AsRef<Path>,
+        target: impl AsRef<Path>,
+    ) -> EntryBuilder<'a> {
+        self.add(path, Kind::RelativeSymlink(target.as_ref().to_path_buf()))
     }
 
     /// Adds a symbolic link pointing at a target that doesn't exist yet,
@@ -426,6 +455,10 @@ fn create_entry(root: &Path, entry_path: &Path, kind: &Kind<'_>) -> Result<(), B
             create_symlink(&target, entry_path)
                 .map_err(|err| BuildError::FailedToCreateSymlink(entry_path.to_path_buf(), err))?;
         }
+        Kind::RelativeSymlink(target) => {
+            create_symlink(target, entry_path)
+                .map_err(|err| BuildError::FailedToCreateSymlink(entry_path.to_path_buf(), err))?;
+        }
         #[cfg(windows)]
         Kind::SymlinkDir(target) => {
             let target = resolve_symlink_target(root, target);
@@ -458,7 +491,11 @@ fn create_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
 
 #[cfg(windows)]
 fn create_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
-    if target.is_dir() {
+    let resolved_target = link
+        .parent()
+        .map_or_else(|| target.to_path_buf(), |parent| parent.join(target));
+
+    if resolved_target.is_dir() {
         std::os::windows::fs::symlink_dir(target, link)
     } else {
         std::os::windows::fs::symlink_file(target, link)
@@ -670,6 +707,13 @@ impl<'a> EntryBuilder<'a> {
         self.builder.add_symlink(path, target)
     }
 
+    /// Adds a symbolic link whose target is written verbatim, interpreted by
+    /// the OS relative to the link's parent directory.
+    #[must_use]
+    pub fn add_relative_symlink(self, path: impl AsRef<Path>, target: impl AsRef<Path>) -> Self {
+        self.builder.add_relative_symlink(path, target)
+    }
+
     /// Adds a symbolic link pointing at a target that doesn't exist yet,
     /// explicitly created as a directory link.
     #[cfg(windows)]
@@ -789,6 +833,7 @@ enum Kind<'a> {
     BinaryFile(Vec<u8>),
     FileToCopy(PathBuf),
     Symlink(PathBuf),
+    RelativeSymlink(PathBuf),
     #[cfg(windows)]
     SymlinkDir(PathBuf),
     #[cfg(windows)]
@@ -805,6 +850,7 @@ impl std::fmt::Debug for Kind<'_> {
             Self::BinaryFile(bytes) => f.debug_tuple("BinaryFile").field(bytes).finish(),
             Self::FileToCopy(path) => f.debug_tuple("FileToCopy").field(path).finish(),
             Self::Symlink(path) => f.debug_tuple("Symlink").field(path).finish(),
+            Self::RelativeSymlink(path) => f.debug_tuple("RelativeSymlink").field(path).finish(),
             #[cfg(windows)]
             Self::SymlinkDir(path) => f.debug_tuple("SymlinkDir").field(path).finish(),
             #[cfg(windows)]
@@ -816,7 +862,7 @@ impl std::fmt::Debug for Kind<'_> {
 impl Kind<'_> {
     const fn is_symlink(&self) -> bool {
         match self {
-            Self::Symlink(_) => true,
+            Self::Symlink(_) | Self::RelativeSymlink(_) => true,
             #[cfg(windows)]
             Self::SymlinkDir(_) | Self::SymlinkFile(_) => true,
             _ => false,
@@ -1303,6 +1349,27 @@ mod tests {
         drop(temp_dir);
 
         assert!(target_path.exists());
+    }
+
+    #[test]
+    fn test_add_relative_symlink() {
+        let temp_dir = TempDirectoryBuilder::default()
+            .add_text_file("data", "content")
+            .add_directory("dir")
+            .add_relative_symlink("dir/link", "../data")
+            .build()
+            .unwrap();
+
+        let link_path = temp_dir.path().join("dir/link");
+
+        assert_eq!(
+            std::fs::read_link(&link_path).unwrap(),
+            Path::new("../data")
+        );
+        assert_eq!(
+            std::fs::canonicalize(&link_path).unwrap(),
+            temp_dir.path().join("data")
+        );
     }
 
     #[test]
