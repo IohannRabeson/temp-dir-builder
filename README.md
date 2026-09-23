@@ -102,6 +102,13 @@ let temp_dir = TempDirectoryBuilder::default()
 ```
 <!-- </snip> -->
 
+## Development
+
+On Windows, creating symlinks requires either running elevated or enabling
+Developer Mode (Settings > Privacy & security > For developers). Without one
+of these, the tests that create a symlink fail with
+`ERROR_PRIVILEGE_NOT_HELD` (OS error 1314).
+
 ## Credits
 This is a fork of [tree-fs](https://github.com/kaplanelad/tree-fs) I heavily rewritten, original idea by Elad Kaplan.  
 
