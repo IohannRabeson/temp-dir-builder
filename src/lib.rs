@@ -240,6 +240,27 @@ impl<'a> TempDirectoryBuilder<'a> {
         self.entry_mut(key).readonly = Some(readonly);
     }
 
+    /// Sets whether an entry is executable. On Unix this sets the owner
+    /// execute bit; on other platforms it does nothing.
+    ///
+    /// # Panics
+    /// Panics if `key` was not returned by this builder.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    // <snip id="example-set-executable">
+    /// use temp_dir_builder::TempDirectoryBuilder;
+    /// let mut builder = TempDirectoryBuilder::default();
+    /// let script = builder.add_text_file("run.sh", "#!/bin/sh");
+    /// builder.set_executable(&script, true);
+    /// let temp_dir = builder.build().expect("create temp dir");
+    // </snip>
+    /// ```
+    pub fn set_executable(&mut self, key: &EntryKey, executable: bool) {
+        self.entry_mut(key).executable = Some(executable);
+    }
+
     /// Sets the Unix permission bits of an entry, e.g. `0o744`.
     ///
     /// # Panics
@@ -291,6 +312,7 @@ impl<'a> TempDirectoryBuilder<'a> {
             path,
             kind,
             readonly: None,
+            executable: None,
             #[cfg(unix)]
             mode: None,
         });
@@ -669,7 +691,7 @@ fn apply_permissions(entry_path: &Path, entry: &Entry<'_>) -> Result<(), BuildEr
     #[cfg(not(unix))]
     let mode: Option<u32> = None;
 
-    if mode.is_none() && entry.readonly.is_none() {
+    if mode.is_none() && entry.readonly.is_none() && entry.executable.is_none() {
         return Ok(());
     }
 
@@ -691,6 +713,10 @@ fn apply_permissions(entry_path: &Path, entry: &Entry<'_>) -> Result<(), BuildEr
         set_readonly(&mut permissions, readonly);
     }
 
+    if let Some(executable) = entry.executable {
+        set_executable(&mut permissions, executable);
+    }
+
     std::fs::set_permissions(entry_path, permissions)
         .map_err(|err| BuildError::FailedToSetPermissions(entry_path.to_path_buf(), err))
 }
@@ -709,6 +735,20 @@ fn set_readonly(permissions: &mut std::fs::Permissions, readonly: bool) {
     #[cfg(not(unix))]
     permissions.set_readonly(readonly);
 }
+
+#[cfg(unix)]
+fn set_executable(permissions: &mut std::fs::Permissions, executable: bool) {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = permissions.mode();
+    permissions.set_mode(if executable {
+        mode | 0o100
+    } else {
+        mode & !0o111
+    });
+}
+
+#[cfg(not(unix))]
+const fn set_executable(_permissions: &mut std::fs::Permissions, _executable: bool) {}
 
 fn make_deletable(path: &Path) {
     let Ok(metadata) = std::fs::symlink_metadata(path) else {
@@ -884,6 +924,8 @@ struct Entry<'a> {
     kind: Kind<'a>,
     /// Whether the entry must be made read-only.
     readonly: Option<bool>,
+    /// Whether the entry must be made executable.
+    executable: Option<bool>,
     /// The Unix permission bits to apply to the entry.
     #[cfg(unix)]
     mode: Option<u32>,
@@ -1338,6 +1380,61 @@ mod tests {
             .mode();
 
         assert_eq!(mode & 0o777, 0o544);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_set_executable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut builder = TempDirectoryBuilder::default();
+        let script = builder.add_text_file("run.sh", "#!/bin/sh\necho hi\n");
+        builder.set_mode(&script, 0o644);
+        builder.set_executable(&script, true);
+        let temp_dir = builder.build().unwrap();
+
+        let mode = std::fs::metadata(temp_dir.path_of(&script))
+            .unwrap()
+            .permissions()
+            .mode();
+
+        assert_eq!(
+            mode & 0o777,
+            0o744,
+            "owner execute bit added, rest untouched"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_set_executable_false_clears_exec_bits() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut builder = TempDirectoryBuilder::default();
+        let script = builder.add_empty_file("script");
+        builder.set_mode(&script, 0o777);
+        builder.set_executable(&script, false);
+        let temp_dir = builder.build().unwrap();
+
+        let mode = std::fs::metadata(temp_dir.path_of(&script))
+            .unwrap()
+            .permissions()
+            .mode();
+
+        assert_eq!(
+            mode & 0o777,
+            0o666,
+            "exec bits cleared, read and write kept"
+        );
+    }
+
+    #[test]
+    fn test_set_executable_is_portable() {
+        let mut builder = TempDirectoryBuilder::default();
+        let script = builder.add_empty_file("script");
+        builder.set_executable(&script, true);
+
+        assert!(builder.build().is_ok());
     }
 
     #[test]
