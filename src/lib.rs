@@ -171,6 +171,8 @@ impl Default for TempDirectoryBuilder<'_> {
 enum Root {
     /// A random temporary directory will be generated and atomically created during `build()`.
     Random,
+    /// A random directory will be generated under a caller-provided base directory.
+    RandomIn(PathBuf),
     /// A fixed, caller-provided directory.
     Fixed(PathBuf),
 }
@@ -189,6 +191,26 @@ impl<'a> TempDirectoryBuilder<'a> {
     /// By default this is the temporary directory path returned by `std::env::temp_dir()`.
     pub fn root_folder(&mut self, dir: impl AsRef<Path>) {
         self.root = Root::Fixed(dir.as_ref().to_path_buf());
+    }
+
+    /// Generates a random directory under `base` instead of under
+    /// `std::env::temp_dir()`. `base` is created if it does not exist.
+    ///
+    /// Useful when `std::env::temp_dir()` is unsuitable for what is being
+    /// tested, for example because it is excluded from backups and the test
+    /// is checking backup exclusion.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use temp_dir_builder::TempDirectoryBuilder;
+    /// let mut builder = TempDirectoryBuilder::default();
+    /// builder.random_root_in(std::env::current_dir().unwrap());
+    /// let temp_dir = builder.build().expect("create temp dir");
+    /// assert!(temp_dir.path().starts_with(std::env::current_dir().unwrap()));
+    /// ```
+    pub fn random_root_in(&mut self, base: impl AsRef<Path>) {
+        self.root = Root::RandomIn(base.as_ref().to_path_buf());
     }
 
     /// Specifies whether to automatically delete the temporary folder when the `TempDirectory` instance is dropped.\
@@ -264,7 +286,7 @@ impl<'a> TempDirectoryBuilder<'a> {
         let path = path.as_ref().to_path_buf();
         let key_path = path.clean().into_boxed_path();
         let index = self.entries.len();
-        
+
         self.entries.push(Entry {
             path,
             kind,
@@ -477,7 +499,8 @@ impl<'a> TempDirectoryBuilder<'a> {
                 canonicalize(root)
                     .map_err(|err| BuildError::FailedToCreateRootDirectory(root.clone(), err))?
             }
-            Root::Random => create_random_temp_directory()?,
+            Root::Random => create_random_temp_directory(&env::temp_dir())?,
+            Root::RandomIn(base) => create_random_temp_directory(base)?,
         };
 
         let mut created_paths = Vec::with_capacity(self.entries.len());
@@ -775,7 +798,10 @@ fn create_or_validate_fixed_root(root: &Path) -> Result<(), BuildError> {
 
 const MAX_RANDOM_DIRECTORY_ATTEMPTS: u32 = 100;
 
-fn create_random_temp_directory() -> Result<PathBuf, BuildError> {
+fn create_random_temp_directory(base: &Path) -> Result<PathBuf, BuildError> {
+    std::fs::create_dir_all(base)
+        .map_err(|err| BuildError::FailedToCreateRootDirectory(base.to_path_buf(), err))?;
+
     for _ in 0..MAX_RANDOM_DIRECTORY_ATTEMPTS {
         let random_string: String = rng()
             .sample_iter(&Alphanumeric)
@@ -783,7 +809,7 @@ fn create_random_temp_directory() -> Result<PathBuf, BuildError> {
             .map(char::from)
             .collect();
 
-        let path = env::temp_dir().join(random_string);
+        let path = base.join(random_string);
 
         match std::fs::create_dir(&path) {
             Ok(()) => {
@@ -796,7 +822,7 @@ fn create_random_temp_directory() -> Result<PathBuf, BuildError> {
     }
 
     Err(BuildError::FailedToCreateRootDirectory(
-        env::temp_dir(),
+        base.to_path_buf(),
         std::io::Error::new(
             std::io::ErrorKind::AlreadyExists,
             "exhausted attempts to generate an unused random directory name",
@@ -908,6 +934,42 @@ mod tests {
 
         assert_eq!(temp_dir.path(), canonicalize(&temp_dir).unwrap());
         assert!(temp_dir.path().join("foo").exists());
+    }
+
+    #[test]
+    fn test_random_root_in_uses_custom_base() {
+        let base = std::env::temp_dir().join(format!(
+            "test_random_root_in_uses_custom_base_{}",
+            std::process::id()
+        ));
+        let mut builder = TempDirectoryBuilder::default();
+        builder.random_root_in(&base);
+        let temp_dir = builder.build().unwrap();
+
+        assert!(temp_dir.path().starts_with(canonicalize(&base).unwrap()));
+        assert_eq!(temp_dir.path(), canonicalize(&temp_dir).unwrap());
+
+        drop(temp_dir);
+        std::fs::remove_dir(&base).unwrap();
+    }
+
+    #[test]
+    fn test_random_root_in_creates_base_if_missing() {
+        let base = std::env::temp_dir().join(format!(
+            "test_random_root_in_creates_base_if_missing_{}",
+            std::process::id()
+        ));
+        assert!(!base.exists());
+
+        let mut builder = TempDirectoryBuilder::default();
+        builder.random_root_in(&base);
+        let temp_dir = builder.build().unwrap();
+
+        assert!(base.exists());
+        assert!(temp_dir.path().exists());
+
+        drop(temp_dir);
+        std::fs::remove_dir(&base).unwrap();
     }
 
     #[test]
@@ -1378,7 +1440,7 @@ mod tests {
     fn test_symlink_target_from_key() {
         let mut builder = TempDirectoryBuilder::default();
         let data = builder.add_text_file("outside/precious.txt", "precious data");
-        builder.add_symlink("link", &data);
+        builder.add_symlink_to("link", &data);
         let temp_dir = builder.build().unwrap();
 
         assert_eq!(
