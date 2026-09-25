@@ -38,6 +38,19 @@ let temp_dir = builder.build().expect("create temp dir");
 ```
 <!-- </snip> -->
 
+`set_executable` sets the owner execute bit on Unix and does nothing on other
+platforms, a portable spelling for "this file must be runnable":
+
+<!-- <snip id="example-set-executable" inject_from="code" strip_prefix="    /// " template="rust"> -->
+```rust
+use temp_dir_builder::TempDirectoryBuilder;
+let mut builder = TempDirectoryBuilder::default();
+let script = builder.add_text_file("run.sh", "#!/bin/sh");
+builder.set_executable(&script, true);
+let temp_dir = builder.build().expect("create temp dir");
+```
+<!-- </snip> -->
+
 A directory only needed as the parent of another entry can still be declared
 explicitly to get a key for it, instead of naming it again with `join`:
 
