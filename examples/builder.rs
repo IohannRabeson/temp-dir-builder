@@ -8,13 +8,12 @@
 use temp_dir_builder::TempDirectoryBuilder;
 
 fn main() {
-    let temp_directory = TempDirectoryBuilder::default()
-        .add_text_file("test/foo.txt", "bar")
-        .set_readonly(true)
-        .add_empty_file("test/folder-a/folder-b/bar.txt")
-        .add_file("test_file.rs", file!())
-        .build()
-        .expect("create tree fs");
+    let mut builder = TempDirectoryBuilder::default();
+    let readonly_file = builder.add_text_file("test/foo.txt", "bar");
+    builder.set_readonly(&readonly_file, true);
+    builder.add_empty_file("test/folder-a/folder-b/bar.txt");
+    builder.add_file("test_file.rs", file!());
+    let temp_directory = builder.build().expect("create temp dir");
 
     println!(
         "created successfully in {}",

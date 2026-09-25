@@ -31,10 +31,9 @@ impl TempDirectory {
     ///
     /// ```rust
     /// use temp_dir_builder::TempDirectoryBuilder;
-    /// let temp_dir = TempDirectoryBuilder::default()
-    ///     .add_text_file("foo.txt", "bar")
-    ///     .build()
-    ///     .expect("create temp dir");
+    /// let mut builder = TempDirectoryBuilder::default();
+    /// builder.add_text_file("foo.txt", "bar");
+    /// let temp_dir = builder.build().expect("create temp dir");
     /// let content = std::fs::read_to_string(temp_dir.join("foo.txt")).unwrap();
     /// assert_eq!(content, "bar");
     /// ```
@@ -58,12 +57,46 @@ impl TempDirectory {
     pub fn to_path_buf(&self) -> PathBuf {
         self.path.clone()
     }
+
+    /// Resolves an `EntryKey` to the path of the entry it identifies.
+    ///
+    /// A directory only needed as the parent of another entry can still be
+    /// declared explicitly to get a key for it, instead of naming it again
+    /// with `join`:
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    // <snip id="example-path-of">
+    /// use temp_dir_builder::TempDirectoryBuilder;
+    /// let mut builder = TempDirectoryBuilder::default();
+    /// let repository = builder.add_directory("repository");
+    /// builder.add_text_file("repository/.gitignore", "*.log");
+    /// let temp_dir = builder.build().expect("create temp dir");
+    /// let repository_path = temp_dir.path_of(&repository);
+    /// assert_eq!(repository_path, temp_dir.join("repository"));
+    // </snip>
+    /// ```
+    #[must_use]
+    pub fn path_of(&self, key: &EntryKey) -> PathBuf {
+        self.path.join(&key.path)
+    }
 }
 
 impl AsRef<Path> for TempDirectory {
     fn as_ref(&self) -> &Path {
         &self.path
     }
+}
+
+/// Identifies an entry declared on a `TempDirectoryBuilder`.
+///
+/// Returned by the `add_*` methods. There is no other way to build one, so a
+/// key always designates an entry that `build()` creates.
+#[derive(Debug, Clone)]
+pub struct EntryKey {
+    index: usize,
+    path: Box<Path>,
 }
 
 /// Error happening when creating the directory tree.
@@ -102,14 +135,13 @@ pub enum BuildError {
 /// ```rust
 // <snip id="example-builder">
 /// use temp_dir_builder::TempDirectoryBuilder;
-/// let temp_dir = TempDirectoryBuilder::default()
-///     .add_text_file("test/foo.txt", "bar")
-///     .add_binary_file("test/foo2.txt", &[98u8, 97u8, 114u8])
-///     .add_empty_file("test/folder-a/folder-b/bar.txt")
-///     .add_file("test/file.rs", file!())
-///     .add_directory("test/dir")
-///     .build()
-///     .expect("create temp dir");
+/// let mut builder = TempDirectoryBuilder::default();
+/// builder.add_text_file("test/foo.txt", "bar");
+/// builder.add_binary_file("test/foo2.txt", &[98u8, 97u8, 114u8]);
+/// builder.add_empty_file("test/folder-a/folder-b/bar.txt");
+/// builder.add_file("test/file.rs", file!());
+/// builder.add_directory("test/dir");
+/// let temp_dir = builder.build().expect("create temp dir");
 /// println!("created successfully in {}", temp_dir.path().display());
 // </snip>
 /// ```
@@ -155,49 +187,109 @@ impl Drop for TempDirectory {
 impl<'a> TempDirectoryBuilder<'a> {
     /// Sets the root folder where the tree will be created.\
     /// By default this is the temporary directory path returned by `std::env::temp_dir()`.
-    #[must_use]
-    pub fn root_folder(mut self, dir: impl AsRef<Path>) -> Self {
+    pub fn root_folder(&mut self, dir: impl AsRef<Path>) {
         self.root = Root::Fixed(dir.as_ref().to_path_buf());
-        self
     }
 
     /// Specifies whether to automatically delete the temporary folder when the `TempDirectory` instance is dropped.\
     /// By default this is value is set to `true`.
-    #[must_use]
-    pub const fn delete_on_drop(mut self, delete_on_drop: bool) -> Self {
+    pub const fn delete_on_drop(&mut self, delete_on_drop: bool) {
         self.delete_on_drop = delete_on_drop;
-        self
     }
 
-    #[must_use]
-    fn add(mut self, path: impl AsRef<Path>, kind: Kind<'a>) -> EntryBuilder<'a> {
+    /// Sets whether an entry is read-only.
+    ///
+    /// # Panics
+    /// Panics if `key` was not returned by this builder.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    // <snip id="example-set-readonly">
+    /// use temp_dir_builder::TempDirectoryBuilder;
+    /// let mut builder = TempDirectoryBuilder::default();
+    /// let foo = builder.add_text_file("test/foo.txt", "bar");
+    /// builder.set_readonly(&foo, true);
+    /// builder.add_directory("test/dir");
+    /// let temp_dir = builder.build().expect("create temp dir");
+    // </snip>
+    /// ```
+    pub fn set_readonly(&mut self, key: &EntryKey, readonly: bool) {
+        self.entry_mut(key).readonly = Some(readonly);
+    }
+
+    /// Sets the Unix permission bits of an entry, e.g. `0o744`.
+    ///
+    /// # Panics
+    /// Panics if `key` was not returned by this builder.
+    ///
+    /// # Examples
+    ///
+    /// On Unix platforms, `set_mode` can be used to set the raw permission bits:
+    ///
+    /// ```rust
+    // <snip id="example-set-mode">
+    /// # #[cfg(unix)]
+    /// # {
+    /// use temp_dir_builder::TempDirectoryBuilder;
+    /// let mut builder = TempDirectoryBuilder::default();
+    /// let foo = builder.add_text_file("test/foo.txt", "bar");
+    /// builder.set_mode(&foo, 0o744);
+    /// builder.add_directory("test/dir");
+    /// let temp_dir = builder.build().expect("create temp dir");
+    /// # }
+    // </snip>
+    /// ```
+    #[cfg(unix)]
+    pub fn set_mode(&mut self, key: &EntryKey, mode: u32) {
+        self.entry_mut(key).mode = Some(mode);
+    }
+
+    fn assert_owns(&self, key: &EntryKey) {
+        assert!(
+            self.entries
+                .get(key.index)
+                .is_some_and(|entry| entry.path.clean().as_path() == &*key.path),
+            "EntryKey for '{}' does not belong to this builder",
+            key.path.display()
+        );
+    }
+
+    fn entry_mut(&mut self, key: &EntryKey) -> &mut Entry<'a> {
+        self.assert_owns(key);
+        &mut self.entries[key.index]
+    }
+
+    fn add(&mut self, path: impl AsRef<Path>, kind: Kind<'a>) -> EntryKey {
+        let path = path.as_ref().to_path_buf();
+        let key_path = path.clean().into_boxed_path();
+        let index = self.entries.len();
+        
         self.entries.push(Entry {
-            path: path.as_ref().to_path_buf(),
+            path,
             kind,
             readonly: None,
             #[cfg(unix)]
             mode: None,
         });
-        let entry_index = self.entries.len() - 1;
-        EntryBuilder {
-            builder: self,
-            entry_index,
+
+        EntryKey {
+            index,
+            path: key_path,
         }
     }
 
     /// Adds an empty file.
     /// * `path` - Path of the file to create. This path must be relative to the created directory. If the path is outside
     ///   the created directory (e.g: "../foo") the error `BuildError::EntryOutsideDirectory` will be returned.
-    #[must_use]
-    pub fn add_empty_file<P: AsRef<Path>>(self, path: P) -> EntryBuilder<'a> {
+    pub fn add_empty_file<P: AsRef<Path>>(&mut self, path: P) -> EntryKey {
         self.add(path, Kind::EmptyFile)
     }
 
     /// Adds a directory.
     /// * `path` - Path of the directory to create. This path must be relative to the created directory.
     ///   If the path is outside the created directory (e.g: "../foo") the error `BuildError::EntryOutsideDirectory` will be returned.
-    #[must_use]
-    pub fn add_directory(self, path: impl AsRef<Path>) -> EntryBuilder<'a> {
+    pub fn add_directory(&mut self, path: impl AsRef<Path>) -> EntryKey {
         self.add(path, Kind::Directory)
     }
 
@@ -205,12 +297,7 @@ impl<'a> TempDirectoryBuilder<'a> {
     /// * `path` - Path of the text file to create. This path must be relative to the created directory.
     ///   If the path is outside the created directory (e.g: "../foo") the error `BuildError::EntryOutsideDirectory` will be returned.
     /// * `text` - Text to be written in the new file created.
-    #[must_use]
-    pub fn add_text_file(
-        self,
-        path: impl AsRef<Path>,
-        text: impl Into<String>,
-    ) -> EntryBuilder<'a> {
+    pub fn add_text_file(&mut self, path: impl AsRef<Path>, text: impl Into<String>) -> EntryKey {
         self.add(path, Kind::TextFile(text.into()))
     }
 
@@ -218,8 +305,7 @@ impl<'a> TempDirectoryBuilder<'a> {
     /// * `path` - Path of the binary file to create. This path must be relative to the created directory.
     ///   If the path is outside the created directory (e.g: "../foo") the error `BuildError::EntryOutsideDirectory` will be returned.
     /// * `content` - The bytes to be written in the new file created.
-    #[must_use]
-    pub fn add_binary_file(self, path: impl AsRef<Path>, content: &[u8]) -> EntryBuilder<'a> {
+    pub fn add_binary_file(&mut self, path: impl AsRef<Path>, content: &[u8]) -> EntryKey {
         self.add(path, Kind::BinaryFile(content.to_vec()))
     }
 
@@ -234,17 +320,15 @@ impl<'a> TempDirectoryBuilder<'a> {
     /// ```rust
     // <snip id="example-add-text-file-with">
     /// use temp_dir_builder::TempDirectoryBuilder;
-    /// let temp_dir = TempDirectoryBuilder::default()
-    ///     .add_text_file_with("config.toml", |root| {
-    ///         format!("data_dir = {:?}", root.join("data"))
-    ///     })
-    ///     .add_directory("data")
-    ///     .build()
-    ///     .expect("create temp dir");
+    /// let mut builder = TempDirectoryBuilder::default();
+    /// builder.add_text_file_with("config.toml", |root| {
+    ///     format!("data_dir = {:?}", root.join("data"))
+    /// });
+    /// builder.add_directory("data");
+    /// let temp_dir = builder.build().expect("create temp dir");
     // </snip>
     /// ```
-    #[must_use]
-    pub fn add_text_file_with<F>(self, path: impl AsRef<Path>, content: F) -> EntryBuilder<'a>
+    pub fn add_text_file_with<F>(&mut self, path: impl AsRef<Path>, content: F) -> EntryKey
     where
         F: Fn(&Path) -> String + 'a,
     {
@@ -255,8 +339,7 @@ impl<'a> TempDirectoryBuilder<'a> {
     /// * `path` - Path of the file to create. This path must be relative to the created directory.
     ///   If the path is outside the created directory (e.g: "../foo") the error `BuildError::EntryOutsideDirectory` will be returned.
     /// * `file` - Path of the file to be copied. If relative, it is resolved against the current working directory.
-    #[must_use]
-    pub fn add_file(self, path: impl AsRef<Path>, file: impl AsRef<Path>) -> EntryBuilder<'a> {
+    pub fn add_file(&mut self, path: impl AsRef<Path>, file: impl AsRef<Path>) -> EntryKey {
         self.add(path, Kind::FileToCopy(file.as_ref().to_path_buf()))
     }
 
@@ -267,24 +350,53 @@ impl<'a> TempDirectoryBuilder<'a> {
     ///   root of the temporary directory and written as an absolute path; an
     ///   absolute target is written verbatim. The target does not have to exist,
     ///   nor be inside the temporary directory. Use `add_relative_symlink` to
-    ///   write the target verbatim instead.
+    ///   write the target verbatim instead, or `add_symlink_to` when the target
+    ///   is an entry already declared on this builder.
     ///
     /// # Examples
     ///
     /// ```rust
     // <snip id="example-add-symlink">
     /// use temp_dir_builder::TempDirectoryBuilder;
-    /// let temp_dir = TempDirectoryBuilder::default()
-    ///     .add_text_file("data/file.txt", "content")
-    ///     .add_symlink("link_to_data", "data")
-    ///     .add_symlink("link_to_file", "data/file.txt")
-    ///     .build()
-    ///     .expect("create temp dir");
+    /// let mut builder = TempDirectoryBuilder::default();
+    /// builder.add_text_file("data/file.txt", "content");
+    /// builder.add_symlink("link_to_data", "data");
+    /// builder.add_symlink("link_to_file", "data/file.txt");
+    /// let temp_dir = builder.build().expect("create temp dir");
     // </snip>
     /// ```
-    #[must_use]
-    pub fn add_symlink(self, path: impl AsRef<Path>, target: impl AsRef<Path>) -> EntryBuilder<'a> {
+    pub fn add_symlink(&mut self, path: impl AsRef<Path>, target: impl AsRef<Path>) -> EntryKey {
         self.add(path, Kind::Symlink(target.as_ref().to_path_buf()))
+    }
+
+    /// Adds a symbolic link targeting an entry already declared on this
+    /// builder.
+    ///
+    /// Unlike `add_symlink`, `target` can only be an `EntryKey`, so a target
+    /// that was renamed or removed is a compile error at the call site, not a
+    /// silently dangling link. Use `add_symlink` instead when the target is
+    /// meant to be dangling or to live outside the temporary directory.
+    ///
+    /// * `path` - Path of the link, relative to the root of the temporary directory.
+    /// * `target` - Key of the entry to link to, as returned by an `add_*` method.
+    ///
+    /// # Panics
+    /// Panics if `target` was not returned by this builder.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    // <snip id="example-add-symlink-to">
+    /// use temp_dir_builder::TempDirectoryBuilder;
+    /// let mut builder = TempDirectoryBuilder::default();
+    /// let data = builder.add_directory("data");
+    /// builder.add_symlink_to("link_to_data", &data);
+    /// let temp_dir = builder.build().expect("create temp dir");
+    // </snip>
+    /// ```
+    pub fn add_symlink_to(&mut self, path: impl AsRef<Path>, target: &EntryKey) -> EntryKey {
+        self.assert_owns(target);
+        self.add(path, Kind::Symlink(target.path.to_path_buf()))
     }
 
     /// Adds a symbolic link whose target is written verbatim, interpreted by
@@ -299,19 +411,17 @@ impl<'a> TempDirectoryBuilder<'a> {
     /// ```rust
     // <snip id="example-add-relative-symlink">
     /// use temp_dir_builder::TempDirectoryBuilder;
-    /// let temp_dir = TempDirectoryBuilder::default()
-    ///     .add_text_file("data/file.txt", "content")
-    ///     .add_relative_symlink("dir/link", "../data")
-    ///     .build()
-    ///     .expect("create temp dir");
+    /// let mut builder = TempDirectoryBuilder::default();
+    /// builder.add_text_file("data/file.txt", "content");
+    /// builder.add_relative_symlink("dir/link", "../data");
+    /// let temp_dir = builder.build().expect("create temp dir");
     // </snip>
     /// ```
-    #[must_use]
     pub fn add_relative_symlink(
-        self,
+        &mut self,
         path: impl AsRef<Path>,
         target: impl AsRef<Path>,
-    ) -> EntryBuilder<'a> {
+    ) -> EntryKey {
         self.add(path, Kind::RelativeSymlink(target.as_ref().to_path_buf()))
     }
 
@@ -325,12 +435,11 @@ impl<'a> TempDirectoryBuilder<'a> {
     /// Creating symlinks on Windows requires developer mode or elevated
     /// privileges.
     #[cfg(windows)]
-    #[must_use]
     pub fn add_symlink_dir(
-        self,
+        &mut self,
         path: impl AsRef<Path>,
         target: impl AsRef<Path>,
-    ) -> EntryBuilder<'a> {
+    ) -> EntryKey {
         self.add(path, Kind::SymlinkDir(target.as_ref().to_path_buf()))
     }
 
@@ -344,12 +453,11 @@ impl<'a> TempDirectoryBuilder<'a> {
     /// Creating symlinks on Windows requires developer mode or elevated
     /// privileges.
     #[cfg(windows)]
-    #[must_use]
     pub fn add_symlink_file(
-        self,
+        &mut self,
         path: impl AsRef<Path>,
         target: impl AsRef<Path>,
-    ) -> EntryBuilder<'a> {
+    ) -> EntryKey {
         self.add(path, Kind::SymlinkFile(target.as_ref().to_path_buf()))
     }
 
@@ -612,156 +720,6 @@ fn make_deletable(path: &Path) {
     }
 }
 
-/// A builder returned after an entry is added, allowing permissions
-/// to be configured before continuing to build the tree.
-///
-/// # Examples
-///
-/// ```rust
-// <snip id="example-set-readonly">
-/// use temp_dir_builder::TempDirectoryBuilder;
-/// let temp_dir = TempDirectoryBuilder::default()
-///     .add_text_file("test/foo.txt", "bar").set_readonly(true)
-///     .add_directory("test/dir")
-///     .build()
-///     .expect("create temp dir");
-// </snip>
-/// ```
-///
-/// On Unix platforms, `set_mode` can be used to set the raw permission bits:
-///
-/// ```rust
-// <snip id="example-set-mode">
-/// # #[cfg(unix)]
-/// # {
-/// use temp_dir_builder::TempDirectoryBuilder;
-/// let temp_dir = TempDirectoryBuilder::default()
-///     .add_text_file("test/foo.txt", "bar").set_mode(0o744)
-///     .add_directory("test/dir")
-///     .build()
-///     .expect("create temp dir");
-/// # }
-// </snip>
-/// ```
-#[derive(Debug)]
-pub struct EntryBuilder<'a> {
-    builder: TempDirectoryBuilder<'a>,
-    entry_index: usize,
-}
-
-impl<'a> EntryBuilder<'a> {
-    /// Sets whether the entry just added is read-only.
-    #[must_use]
-    pub fn set_readonly(mut self, readonly: bool) -> Self {
-        self.last_entry_mut().readonly = Some(readonly);
-        self
-    }
-
-    /// Sets the Unix permission bits of the entry just added, e.g. `0o744`.
-    #[cfg(unix)]
-    #[must_use]
-    pub fn set_mode(mut self, mode: u32) -> Self {
-        self.last_entry_mut().mode = Some(mode);
-        self
-    }
-
-    fn last_entry_mut(&mut self) -> &mut Entry<'a> {
-        &mut self.builder.entries[self.entry_index]
-    }
-
-    /// Sets the root folder where the tree will be created.
-    /// By default this is the temporary directory path returned by `std::env::temp_dir()`.
-    #[must_use]
-    pub fn root_folder(self, dir: impl AsRef<Path>) -> TempDirectoryBuilder<'a> {
-        self.builder.root_folder(dir)
-    }
-
-    /// Specifies whether to automatically delete the temporary folder when the `TempDirectory` instance is dropped.
-    /// By default this is value is set to `true`.
-    #[must_use]
-    pub fn delete_on_drop(self, delete_on_drop: bool) -> TempDirectoryBuilder<'a> {
-        self.builder.delete_on_drop(delete_on_drop)
-    }
-
-    /// Adds an empty file.
-    #[must_use]
-    pub fn add_empty_file<P: AsRef<Path>>(self, path: P) -> Self {
-        self.builder.add_empty_file(path)
-    }
-
-    /// Adds a directory.
-    #[must_use]
-    pub fn add_directory(self, path: impl AsRef<Path>) -> Self {
-        self.builder.add_directory(path)
-    }
-
-    /// Adds a text file specifying the content.
-    #[must_use]
-    pub fn add_text_file(self, path: impl AsRef<Path>, text: impl Into<String>) -> Self {
-        self.builder.add_text_file(path, text)
-    }
-
-    /// Adds a binary file specifying the content.
-    #[must_use]
-    pub fn add_binary_file(self, path: impl AsRef<Path>, content: &[u8]) -> Self {
-        self.builder.add_binary_file(path, content)
-    }
-
-    /// Adds a text file whose content is computed from the root path of the
-    /// temporary directory when `build()` runs.
-    #[must_use]
-    pub fn add_text_file_with<F>(self, path: impl AsRef<Path>, content: F) -> Self
-    where
-        F: Fn(&Path) -> String + 'a,
-    {
-        self.builder.add_text_file_with(path, content)
-    }
-
-    /// Adds a file specifying a source file to be copied.
-    #[must_use]
-    pub fn add_file(self, path: impl AsRef<Path>, file: impl AsRef<Path>) -> Self {
-        self.builder.add_file(path, file)
-    }
-
-    /// Adds a symbolic link.
-    #[must_use]
-    pub fn add_symlink(self, path: impl AsRef<Path>, target: impl AsRef<Path>) -> Self {
-        self.builder.add_symlink(path, target)
-    }
-
-    /// Adds a symbolic link whose target is written verbatim, interpreted by
-    /// the OS relative to the link's parent directory.
-    #[must_use]
-    pub fn add_relative_symlink(self, path: impl AsRef<Path>, target: impl AsRef<Path>) -> Self {
-        self.builder.add_relative_symlink(path, target)
-    }
-
-    /// Adds a symbolic link pointing at a target that doesn't exist yet,
-    /// explicitly created as a directory link.
-    #[cfg(windows)]
-    #[must_use]
-    pub fn add_symlink_dir(self, path: impl AsRef<Path>, target: impl AsRef<Path>) -> Self {
-        self.builder.add_symlink_dir(path, target)
-    }
-
-    /// Adds a symbolic link pointing at a target that doesn't exist yet,
-    /// explicitly created as a file link.
-    #[cfg(windows)]
-    #[must_use]
-    pub fn add_symlink_file(self, path: impl AsRef<Path>, target: impl AsRef<Path>) -> Self {
-        self.builder.add_symlink_file(path, target)
-    }
-
-    /// Builds the file tree by generating files and directories based on the
-    /// list of `Entry`s.
-    ///
-    /// # Errors
-    /// A `BuildError` is returned in case of error.
-    pub fn build(&self) -> Result<TempDirectory, BuildError> {
-        self.builder.build()
-    }
-}
-
 fn create_or_validate_fixed_root(root: &Path) -> Result<(), BuildError> {
     match std::fs::create_dir(root) {
         Ok(()) => return Ok(()),
@@ -944,10 +902,9 @@ mod tests {
 
     #[test]
     fn test_random_root_is_canonical() {
-        let temp_dir = TempDirectoryBuilder::default()
-            .add_empty_file("foo")
-            .build()
-            .unwrap();
+        let mut builder = TempDirectoryBuilder::default();
+        builder.add_empty_file("foo");
+        let temp_dir = builder.build().unwrap();
 
         assert_eq!(temp_dir.path(), canonicalize(&temp_dir).unwrap());
         assert!(temp_dir.path().join("foo").exists());
@@ -959,10 +916,9 @@ mod tests {
             "test_root_folder_relative_path_is_canonical_{}",
             std::process::id()
         );
-        let temp_dir = TempDirectoryBuilder::default()
-            .root_folder(&dir_name)
-            .build()
-            .unwrap();
+        let mut builder = TempDirectoryBuilder::default();
+        builder.root_folder(&dir_name);
+        let temp_dir = builder.build().unwrap();
 
         assert!(temp_dir.path().is_absolute());
         assert_eq!(temp_dir.path(), canonicalize(&temp_dir).unwrap());
@@ -980,10 +936,9 @@ mod tests {
         std::os::unix::fs::symlink(real_base.path(), &link).unwrap();
 
         let root = link.join("child");
-        let temp_dir = TempDirectoryBuilder::default()
-            .root_folder(&root)
-            .build()
-            .unwrap();
+        let mut builder = TempDirectoryBuilder::default();
+        builder.root_folder(&root);
+        let temp_dir = builder.build().unwrap();
 
         assert_eq!(temp_dir.path(), &real_base.path().join("child"));
 
@@ -994,10 +949,9 @@ mod tests {
     fn test_add_text_file() {
         let expected_content = "bar";
         let entry_name = "foo.txt";
-        let temp_dir = TempDirectoryBuilder::default()
-            .add_text_file(entry_name, expected_content)
-            .build()
-            .unwrap();
+        let mut builder = TempDirectoryBuilder::default();
+        builder.add_text_file(entry_name, expected_content);
+        let temp_dir = builder.build().unwrap();
         let entry_path = temp_dir.path().join(entry_name);
 
         assert!(entry_path.exists());
@@ -1010,10 +964,9 @@ mod tests {
     #[test]
     fn test_add_text_file_with() {
         let entry_name = "foo.txt";
-        let temp_dir = TempDirectoryBuilder::default()
-            .add_text_file_with(entry_name, |root| format!("root is {}", root.display()))
-            .build()
-            .unwrap();
+        let mut builder = TempDirectoryBuilder::default();
+        builder.add_text_file_with(entry_name, |root| format!("root is {}", root.display()));
+        let temp_dir = builder.build().unwrap();
         let entry_path = temp_dir.path().join(entry_name);
 
         let content = std::fs::read_to_string(entry_path).expect("read text in foo.txt");
@@ -1025,10 +978,9 @@ mod tests {
     fn test_add_text_file_with_borrowed_local() {
         let entry_name = "foo.txt";
         let template = String::from("root is");
-        let temp_dir = TempDirectoryBuilder::default()
-            .add_text_file_with(entry_name, |root| format!("{template} {}", root.display()))
-            .build()
-            .unwrap();
+        let mut builder = TempDirectoryBuilder::default();
+        builder.add_text_file_with(entry_name, |root| format!("{template} {}", root.display()));
+        let temp_dir = builder.build().unwrap();
         let entry_path = temp_dir.path().join(entry_name);
 
         let content = std::fs::read_to_string(entry_path).expect("read text in foo.txt");
@@ -1042,13 +994,12 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let entry_name = "hook.sh";
-        let temp_dir = TempDirectoryBuilder::default()
-            .add_text_file_with(entry_name, |root| {
-                format!("#!/bin/sh\necho executed > {:?}\n", root.join("marker"))
-            })
-            .set_mode(0o755)
-            .build()
-            .unwrap();
+        let mut builder = TempDirectoryBuilder::default();
+        let hook = builder.add_text_file_with(entry_name, |root| {
+            format!("#!/bin/sh\necho executed > {:?}\n", root.join("marker"))
+        });
+        builder.set_mode(&hook, 0o755);
+        let temp_dir = builder.build().unwrap();
         let entry_path = temp_dir.path().join(entry_name);
 
         let mode = std::fs::metadata(&entry_path).unwrap().permissions().mode();
@@ -1058,9 +1009,9 @@ mod tests {
 
     #[test]
     fn test_add_text_file_with_duplicate_entry() {
-        let builder = TempDirectoryBuilder::default()
-            .add_text_file_with("foo", |_| String::new())
-            .add_text_file_with("foo", |_| String::new());
+        let mut builder = TempDirectoryBuilder::default();
+        builder.add_text_file_with("foo", |_| String::new());
+        builder.add_text_file_with("foo", |_| String::new());
         let error = builder.build().unwrap_err();
 
         assert!(matches!(error, BuildError::DuplicateEntry(_)));
@@ -1068,8 +1019,8 @@ mod tests {
 
     #[test]
     fn test_add_text_file_with_outside_directory() {
-        let builder =
-            TempDirectoryBuilder::default().add_text_file_with("../foo", |_| String::new());
+        let mut builder = TempDirectoryBuilder::default();
+        builder.add_text_file_with("../foo", |_| String::new());
         let error = builder.build().unwrap_err();
 
         assert!(matches!(error, BuildError::EntryOutsideDirectory(_)));
@@ -1079,10 +1030,9 @@ mod tests {
     fn test_add_binary_file() {
         let expected_content = [98u8, 97u8, 114u8];
         let entry_name = "foo.txt";
-        let temp_dir = TempDirectoryBuilder::default()
-            .add_binary_file(entry_name, &expected_content)
-            .build()
-            .unwrap();
+        let mut builder = TempDirectoryBuilder::default();
+        builder.add_binary_file(entry_name, &expected_content);
+        let temp_dir = builder.build().unwrap();
         let entry_path = temp_dir.path().join(entry_name);
 
         assert!(entry_path.exists());
@@ -1095,10 +1045,9 @@ mod tests {
     #[test]
     fn test_add_empty_file() {
         let entry_name = "empty_file.txt";
-        let temp_dir = TempDirectoryBuilder::default()
-            .add_empty_file(entry_name)
-            .build()
-            .unwrap();
+        let mut builder = TempDirectoryBuilder::default();
+        builder.add_empty_file(entry_name);
+        let temp_dir = builder.build().unwrap();
         let entry_path = temp_dir.path().join(entry_name);
 
         assert!(entry_path.exists());
@@ -1111,10 +1060,9 @@ mod tests {
     #[test]
     fn test_add_directory() {
         let entry_name = "empty_directory";
-        let temp_dir = TempDirectoryBuilder::default()
-            .add_directory(entry_name)
-            .build()
-            .unwrap();
+        let mut builder = TempDirectoryBuilder::default();
+        builder.add_directory(entry_name);
+        let temp_dir = builder.build().unwrap();
         let entry_path = temp_dir.path().join(entry_name);
 
         assert!(entry_path.exists());
@@ -1125,10 +1073,9 @@ mod tests {
     fn test_add_file() {
         let entry_name = "test.rs";
         let source_file_path = file!();
-        let temp_dir = TempDirectoryBuilder::default()
-            .add_file(entry_name, source_file_path)
-            .build()
-            .unwrap();
+        let mut builder = TempDirectoryBuilder::default();
+        builder.add_file(entry_name, source_file_path);
+        let temp_dir = builder.build().unwrap();
         let entry_path = temp_dir.path().join(entry_name);
 
         assert!(entry_path.exists());
@@ -1157,7 +1104,8 @@ mod tests {
     #[test]
     fn test_entry_outside_temp_dir() {
         let path_outside_temp_dir = std::env::temp_dir().join("outside");
-        let builder = TempDirectoryBuilder::default().add_empty_file(path_outside_temp_dir);
+        let mut builder = TempDirectoryBuilder::default();
+        builder.add_empty_file(path_outside_temp_dir);
         let error = builder.build().unwrap_err();
 
         assert!(matches!(error, BuildError::EntryOutsideDirectory(_)));
@@ -1166,7 +1114,8 @@ mod tests {
     #[test]
     fn test_source_file_does_not_exists() {
         let source_file_path = std::env::temp_dir().join("not existing file");
-        let builder = TempDirectoryBuilder::default().add_file("foo", source_file_path);
+        let mut builder = TempDirectoryBuilder::default();
+        builder.add_file("foo", source_file_path);
         let error = builder.build().unwrap_err();
 
         assert!(matches!(error, BuildError::FailedToCopyFile(..)));
@@ -1174,9 +1123,9 @@ mod tests {
 
     #[test]
     fn test_duplicated_entries() {
-        let builder = TempDirectoryBuilder::default()
-            .add_empty_file("foo")
-            .add_empty_file("foo");
+        let mut builder = TempDirectoryBuilder::default();
+        builder.add_empty_file("foo");
+        builder.add_empty_file("foo");
         let error = builder.build().unwrap_err();
 
         assert!(matches!(error, BuildError::DuplicateEntry(..)));
@@ -1184,7 +1133,8 @@ mod tests {
 
     #[test]
     fn test_entry_outside_directory() {
-        let builder = TempDirectoryBuilder::default().add_empty_file("../foo");
+        let mut builder = TempDirectoryBuilder::default();
+        builder.add_empty_file("../foo");
         let error = builder.build().unwrap_err();
 
         assert!(matches!(error, BuildError::EntryOutsideDirectory(..)));
@@ -1192,7 +1142,8 @@ mod tests {
 
     #[test]
     fn test_empty_entry_name() {
-        let builder = TempDirectoryBuilder::default().add_empty_file("");
+        let mut builder = TempDirectoryBuilder::default();
+        builder.add_empty_file("");
         let error = builder.build().unwrap_err();
 
         assert!(matches!(error, BuildError::EmptyEntryName(0)));
@@ -1200,14 +1151,13 @@ mod tests {
 
     #[test]
     fn test_set_readonly_file() {
-        let temp_dir = TempDirectoryBuilder::default()
-            .add_text_file("readonly.txt", "foo")
-            .set_readonly(true)
-            .add_text_file("writable.txt", "bar")
-            .set_readonly(false)
-            .add_text_file("default.txt", "baz")
-            .build()
-            .unwrap();
+        let mut builder = TempDirectoryBuilder::default();
+        let readonly = builder.add_text_file("readonly.txt", "foo");
+        builder.set_readonly(&readonly, true);
+        let writable = builder.add_text_file("writable.txt", "bar");
+        builder.set_readonly(&writable, false);
+        builder.add_text_file("default.txt", "baz");
+        let temp_dir = builder.build().unwrap();
 
         let readonly_path = temp_dir.path().join("readonly.txt");
         let writable_path = temp_dir.path().join("writable.txt");
@@ -1237,12 +1187,11 @@ mod tests {
 
     #[test]
     fn test_set_readonly_directory() {
-        let temp_dir = TempDirectoryBuilder::default()
-            .add_directory("dir")
-            .set_readonly(true)
-            .add_text_file("dir/foo.txt", "foo")
-            .build()
-            .unwrap();
+        let mut builder = TempDirectoryBuilder::default();
+        let dir = builder.add_directory("dir");
+        builder.set_readonly(&dir, true);
+        builder.add_text_file("dir/foo.txt", "foo");
+        let temp_dir = builder.build().unwrap();
 
         let dir_path = temp_dir.path().join("dir");
 
@@ -1260,17 +1209,16 @@ mod tests {
 
     #[test]
     fn test_readonly_entries_are_deleted_on_drop() {
-        let temp_dir = TempDirectoryBuilder::default()
-            .add_directory("dir")
-            .set_readonly(true)
-            .add_text_file("dir/foo.txt", "foo")
-            .set_readonly(true)
-            .add_directory("dir/nested")
-            .set_readonly(true)
-            .add_empty_file("dir/nested/bar.txt")
-            .set_readonly(true)
-            .build()
-            .unwrap();
+        let mut builder = TempDirectoryBuilder::default();
+        let dir = builder.add_directory("dir");
+        builder.set_readonly(&dir, true);
+        let file = builder.add_text_file("dir/foo.txt", "foo");
+        builder.set_readonly(&file, true);
+        let nested = builder.add_directory("dir/nested");
+        builder.set_readonly(&nested, true);
+        let nested_file = builder.add_empty_file("dir/nested/bar.txt");
+        builder.set_readonly(&nested_file, true);
+        let temp_dir = builder.build().unwrap();
         let root = temp_dir.path().to_path_buf();
 
         drop(temp_dir);
@@ -1283,14 +1231,13 @@ mod tests {
     fn test_set_mode() {
         use std::os::unix::fs::PermissionsExt;
 
-        let temp_dir = TempDirectoryBuilder::default()
-            .add_text_file("script.sh", "#!/bin/sh")
-            .set_mode(0o744)
-            .add_directory("dir")
-            .set_mode(0o500)
-            .add_empty_file("dir/foo.txt")
-            .build()
-            .unwrap();
+        let mut builder = TempDirectoryBuilder::default();
+        let script = builder.add_text_file("script.sh", "#!/bin/sh");
+        builder.set_mode(&script, 0o744);
+        let dir = builder.add_directory("dir");
+        builder.set_mode(&dir, 0o500);
+        builder.add_empty_file("dir/foo.txt");
+        let temp_dir = builder.build().unwrap();
 
         let script_mode = std::fs::metadata(temp_dir.path().join("script.sh"))
             .unwrap()
@@ -1317,12 +1264,11 @@ mod tests {
     fn test_set_mode_then_readonly() {
         use std::os::unix::fs::PermissionsExt;
 
-        let temp_dir = TempDirectoryBuilder::default()
-            .add_empty_file("foo")
-            .set_mode(0o766)
-            .set_readonly(true)
-            .build()
-            .unwrap();
+        let mut builder = TempDirectoryBuilder::default();
+        let foo = builder.add_empty_file("foo");
+        builder.set_mode(&foo, 0o766);
+        builder.set_readonly(&foo, true);
+        let temp_dir = builder.build().unwrap();
 
         let mode = std::fs::metadata(temp_dir.path().join("foo"))
             .unwrap()
@@ -1333,12 +1279,120 @@ mod tests {
     }
 
     #[test]
+    fn test_set_readonly_applies_to_keyed_entry_not_last() {
+        let mut builder = TempDirectoryBuilder::default();
+        let first = builder.add_text_file("first.txt", "a");
+        builder.add_text_file("second.txt", "b");
+        builder.set_readonly(&first, true);
+        let temp_dir = builder.build().unwrap();
+
+        assert!(
+            std::fs::metadata(temp_dir.path_of(&first))
+                .unwrap()
+                .permissions()
+                .readonly()
+        );
+        assert!(
+            !std::fs::metadata(temp_dir.join("second.txt"))
+                .unwrap()
+                .permissions()
+                .readonly()
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    #[should_panic(expected = "does not belong to this builder")]
+    fn test_set_mode_key_from_unrelated_builder_panics() {
+        let mut other = TempDirectoryBuilder::default();
+        other.add_empty_file("a");
+        other.add_empty_file("b");
+        let key = other.add_empty_file("c");
+
+        let mut builder = TempDirectoryBuilder::default();
+        builder.add_empty_file("only");
+
+        builder.set_mode(&key, 0o644);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    #[should_panic(expected = "does not belong to this builder")]
+    fn test_set_mode_key_index_collision_panics() {
+        let mut other = TempDirectoryBuilder::default();
+        let key = other.add_empty_file("other-entry");
+
+        let mut builder = TempDirectoryBuilder::default();
+        builder.add_empty_file("foo");
+
+        builder.set_mode(&key, 0o644);
+    }
+
+    #[test]
+    fn test_path_of() {
+        let mut builder = TempDirectoryBuilder::default();
+        let file = builder.add_text_file("dir/file.txt", "content");
+        let dir = builder.add_directory("dir/nested");
+        let link = builder.add_symlink("dir/link", "dir/file.txt");
+        let temp_dir = builder.build().unwrap();
+
+        assert_eq!(temp_dir.path_of(&file), temp_dir.join("dir/file.txt"));
+        assert_eq!(temp_dir.path_of(&dir), temp_dir.join("dir/nested"));
+        assert_eq!(temp_dir.path_of(&link), temp_dir.join("dir/link"));
+    }
+
+    #[test]
+    fn test_path_of_returns_cleaned_path() {
+        let mut builder = TempDirectoryBuilder::default();
+        let dotted = builder.add_empty_file("./a");
+        let dotdot = builder.add_empty_file("dir/../b");
+        let temp_dir = builder.build().unwrap();
+
+        assert_eq!(temp_dir.path_of(&dotted), temp_dir.join("a"));
+        assert_eq!(temp_dir.path_of(&dotdot), temp_dir.join("b"));
+    }
+
+    #[test]
+    fn test_key_resolves_under_each_build_root() {
+        let mut builder = TempDirectoryBuilder::default();
+        let file = builder.add_text_file("foo.txt", "bar");
+
+        let first = builder.build().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(first.path_of(&file)).unwrap(),
+            "bar"
+        );
+        let first_root = first.path().to_path_buf();
+        drop(first);
+
+        let second = builder.build().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(second.path_of(&file)).unwrap(),
+            "bar"
+        );
+
+        assert_ne!(first_root, second.path());
+    }
+
+    #[test]
+    fn test_symlink_target_from_key() {
+        let mut builder = TempDirectoryBuilder::default();
+        let data = builder.add_text_file("outside/precious.txt", "precious data");
+        builder.add_symlink("link", &data);
+        let temp_dir = builder.build().unwrap();
+
+        assert_eq!(
+            std::fs::read_link(temp_dir.path().join("link")).unwrap(),
+            temp_dir.path_of(&data)
+        );
+    }
+
+    #[test]
     fn test_add_symlink_relative_target_resolves_to_absolute() {
-        let temp_dir = TempDirectoryBuilder::default()
-            .add_text_file("data/file.txt", "content")
-            .add_symlink("link_to_data", "data")
-            .build()
-            .unwrap();
+        let mut builder = TempDirectoryBuilder::default();
+        builder.add_text_file("data/file.txt", "content");
+        builder.add_symlink("link_to_data", "data");
+        let temp_dir = builder.build().unwrap();
 
         let link_path = temp_dir.path().join("link_to_data");
         let target = std::fs::read_link(&link_path).unwrap();
@@ -1347,17 +1401,38 @@ mod tests {
     }
 
     #[test]
+    fn test_add_symlink_to_matches_add_symlink_with_the_key() {
+        let mut builder = TempDirectoryBuilder::default();
+        let data = builder.add_directory("data");
+        builder.add_symlink_to("link_to_data", &data);
+        let temp_dir = builder.build().unwrap();
+
+        assert_eq!(
+            std::fs::read_link(temp_dir.path().join("link_to_data")).unwrap(),
+            temp_dir.path_of(&data)
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "does not belong to this builder")]
+    fn test_add_symlink_to_foreign_key_panics() {
+        let mut other = TempDirectoryBuilder::default();
+        let target = other.add_directory("data");
+
+        let mut builder = TempDirectoryBuilder::default();
+        builder.add_symlink_to("link", &target);
+    }
+
+    #[test]
     fn test_add_symlink_absolute_target_outside_root_is_not_removed() {
-        let outside = TempDirectoryBuilder::default()
-            .add_text_file("precious.txt", "precious data")
-            .build()
-            .unwrap();
+        let mut outside_builder = TempDirectoryBuilder::default();
+        outside_builder.add_text_file("precious.txt", "precious data");
+        let outside = outside_builder.build().unwrap();
         let target_path = outside.path().join("precious.txt");
 
-        let temp_dir = TempDirectoryBuilder::default()
-            .add_symlink("link", &target_path)
-            .build()
-            .unwrap();
+        let mut builder = TempDirectoryBuilder::default();
+        builder.add_symlink("link", &target_path);
+        let temp_dir = builder.build().unwrap();
 
         assert_eq!(
             std::fs::read_link(temp_dir.path().join("link")).unwrap(),
@@ -1371,12 +1446,11 @@ mod tests {
 
     #[test]
     fn test_add_relative_symlink() {
-        let temp_dir = TempDirectoryBuilder::default()
-            .add_text_file("data", "content")
-            .add_directory("dir")
-            .add_relative_symlink("dir/link", "../data")
-            .build()
-            .unwrap();
+        let mut builder = TempDirectoryBuilder::default();
+        builder.add_text_file("data", "content");
+        builder.add_directory("dir");
+        builder.add_relative_symlink("dir/link", "../data");
+        let temp_dir = builder.build().unwrap();
 
         let link_path = temp_dir.path().join("dir/link");
 
@@ -1392,10 +1466,9 @@ mod tests {
 
     #[test]
     fn test_add_symlink_dangling_target() {
-        let temp_dir = TempDirectoryBuilder::default()
-            .add_symlink("link", "missing")
-            .build()
-            .unwrap();
+        let mut builder = TempDirectoryBuilder::default();
+        builder.add_symlink("link", "missing");
+        let temp_dir = builder.build().unwrap();
 
         let link_path = temp_dir.path().join("link");
 
@@ -1405,9 +1478,9 @@ mod tests {
 
     #[test]
     fn test_add_symlink_with_permissions_fails() {
-        let builder = TempDirectoryBuilder::default()
-            .add_symlink("link", "data")
-            .set_readonly(true);
+        let mut builder = TempDirectoryBuilder::default();
+        let link = builder.add_symlink("link", "data");
+        builder.set_readonly(&link, true);
         let error = builder.build().unwrap_err();
 
         assert!(matches!(error, BuildError::PermissionsOnSymlink(_)));
@@ -1415,17 +1488,15 @@ mod tests {
 
     #[test]
     fn test_dropping_symlink_does_not_affect_readonly_target() {
-        let target_dir = TempDirectoryBuilder::default()
-            .add_text_file("readonly.txt", "foo")
-            .set_readonly(true)
-            .build()
-            .unwrap();
+        let mut target_builder = TempDirectoryBuilder::default();
+        let readonly = target_builder.add_text_file("readonly.txt", "foo");
+        target_builder.set_readonly(&readonly, true);
+        let target_dir = target_builder.build().unwrap();
         let readonly_file_path = target_dir.path().join("readonly.txt");
 
-        let temp_dir = TempDirectoryBuilder::default()
-            .add_symlink("link", target_dir.path())
-            .build()
-            .unwrap();
+        let mut builder = TempDirectoryBuilder::default();
+        builder.add_symlink("link", target_dir.path());
+        let temp_dir = builder.build().unwrap();
 
         drop(temp_dir);
 
@@ -1440,17 +1511,16 @@ mod tests {
 
     #[test]
     fn test_dangling_symlink_is_a_duplicate_entry() {
-        let temp_dir = TempDirectoryBuilder::default()
-            .add_symlink("link", "missing")
-            .delete_on_drop(false)
-            .build()
-            .unwrap();
+        let mut first_builder = TempDirectoryBuilder::default();
+        first_builder.add_symlink("link", "missing");
+        first_builder.delete_on_drop(false);
+        let temp_dir = first_builder.build().unwrap();
         let root = temp_dir.path().to_path_buf();
         drop(temp_dir);
 
-        let builder = TempDirectoryBuilder::default()
-            .root_folder(&root)
-            .add_symlink("link", "other-missing");
+        let mut builder = TempDirectoryBuilder::default();
+        builder.root_folder(&root);
+        builder.add_symlink("link", "other-missing");
         let error = builder.build().unwrap_err();
 
         std::fs::remove_dir_all(&root).unwrap();
@@ -1461,10 +1531,9 @@ mod tests {
     #[test]
     #[cfg(windows)]
     fn test_add_symlink_dir_windows() {
-        let temp_dir = TempDirectoryBuilder::default()
-            .add_symlink_dir("link", "missing")
-            .build()
-            .unwrap();
+        let mut builder = TempDirectoryBuilder::default();
+        builder.add_symlink_dir("link", "missing");
+        let temp_dir = builder.build().unwrap();
 
         let link_path = temp_dir.path().join("link");
         let metadata = std::fs::symlink_metadata(&link_path).unwrap();
@@ -1475,10 +1544,9 @@ mod tests {
     #[test]
     #[cfg(windows)]
     fn test_add_symlink_file_windows() {
-        let temp_dir = TempDirectoryBuilder::default()
-            .add_symlink_file("link", "missing")
-            .build()
-            .unwrap();
+        let mut builder = TempDirectoryBuilder::default();
+        builder.add_symlink_file("link", "missing");
+        let temp_dir = builder.build().unwrap();
 
         let link_path = temp_dir.path().join("link");
         let metadata = std::fs::symlink_metadata(&link_path).unwrap();

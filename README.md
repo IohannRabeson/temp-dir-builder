@@ -14,43 +14,57 @@ When the `temp_dir` instance is dropped, the temporary folder and its contents a
 <!-- <snip id="example-builder" inject_from="code" strip_prefix="/// " template="rust"> -->
 ```rust
 use temp_dir_builder::TempDirectoryBuilder;
-let temp_dir = TempDirectoryBuilder::default()
-    .add_text_file("test/foo.txt", "bar")
-    .add_binary_file("test/foo2.txt", &[98u8, 97u8, 114u8])
-    .add_empty_file("test/folder-a/folder-b/bar.txt")
-    .add_file("test/file.rs", file!())
-    .add_directory("test/dir")
-    .build()
-    .expect("create temp dir");
+let mut builder = TempDirectoryBuilder::default();
+builder.add_text_file("test/foo.txt", "bar");
+builder.add_binary_file("test/foo2.txt", &[98u8, 97u8, 114u8]);
+builder.add_empty_file("test/folder-a/folder-b/bar.txt");
+builder.add_file("test/file.rs", file!());
+builder.add_directory("test/dir");
+let temp_dir = builder.build().expect("create temp dir");
 println!("created successfully in {}", temp_dir.path().display());
 ```
 <!-- </snip> -->
 
-Right after adding a file or a directory, you can configure its permissions before continuing the chain:
+Each `add_*` method returns an `EntryKey`, which can be used afterwards to configure that entry's permissions or to resolve its path:
 
-<!-- <snip id="example-set-readonly" inject_from="code" strip_prefix="/// " template="rust"> -->
+<!-- <snip id="example-set-readonly" inject_from="code" strip_prefix="    /// " template="rust"> -->
 ```rust
 use temp_dir_builder::TempDirectoryBuilder;
-let temp_dir = TempDirectoryBuilder::default()
-    .add_text_file("test/foo.txt", "bar").set_readonly(true)
-    .add_directory("test/dir")
-    .build()
-    .expect("create temp dir");
+let mut builder = TempDirectoryBuilder::default();
+let foo = builder.add_text_file("test/foo.txt", "bar");
+builder.set_readonly(&foo, true);
+builder.add_directory("test/dir");
+let temp_dir = builder.build().expect("create temp dir");
+```
+<!-- </snip> -->
+
+A directory only needed as the parent of another entry can still be declared
+explicitly to get a key for it, instead of naming it again with `join`:
+
+<!-- <snip id="example-path-of" inject_from="code" strip_prefix="    /// " template="rust"> -->
+```rust
+use temp_dir_builder::TempDirectoryBuilder;
+let mut builder = TempDirectoryBuilder::default();
+let repository = builder.add_directory("repository");
+builder.add_text_file("repository/.gitignore", "*.log");
+let temp_dir = builder.build().expect("create temp dir");
+let repository_path = temp_dir.path_of(&repository);
+assert_eq!(repository_path, temp_dir.join("repository"));
 ```
 <!-- </snip> -->
 
 On Unix platforms, `set_mode` can be used to set the raw permission bits:
 
-<!-- <snip id="example-set-mode" inject_from="code" strip_prefix="/// " template="rust"> -->
+<!-- <snip id="example-set-mode" inject_from="code" strip_prefix="    /// " template="rust"> -->
 ```rust
 # #[cfg(unix)]
 # {
 use temp_dir_builder::TempDirectoryBuilder;
-let temp_dir = TempDirectoryBuilder::default()
-    .add_text_file("test/foo.txt", "bar").set_mode(0o744)
-    .add_directory("test/dir")
-    .build()
-    .expect("create temp dir");
+let mut builder = TempDirectoryBuilder::default();
+let foo = builder.add_text_file("test/foo.txt", "bar");
+builder.set_mode(&foo, 0o744);
+builder.add_directory("test/dir");
+let temp_dir = builder.build().expect("create temp dir");
 # }
 ```
 <!-- </snip> -->
@@ -63,13 +77,12 @@ at `build()` time:
 <!-- <snip id="example-add-text-file-with" inject_from="code" strip_prefix="    /// " template="rust"> -->
 ```rust
 use temp_dir_builder::TempDirectoryBuilder;
-let temp_dir = TempDirectoryBuilder::default()
-    .add_text_file_with("config.toml", |root| {
-        format!("data_dir = {:?}", root.join("data"))
-    })
-    .add_directory("data")
-    .build()
-    .expect("create temp dir");
+let mut builder = TempDirectoryBuilder::default();
+builder.add_text_file_with("config.toml", |root| {
+    format!("data_dir = {:?}", root.join("data"))
+});
+builder.add_directory("data");
+let temp_dir = builder.build().expect("create temp dir");
 ```
 <!-- </snip> -->
 
@@ -79,12 +92,25 @@ against the root of the temporary directory:
 <!-- <snip id="example-add-symlink" inject_from="code" strip_prefix="    /// " template="rust"> -->
 ```rust
 use temp_dir_builder::TempDirectoryBuilder;
-let temp_dir = TempDirectoryBuilder::default()
-    .add_text_file("data/file.txt", "content")
-    .add_symlink("link_to_data", "data")
-    .add_symlink("link_to_file", "data/file.txt")
-    .build()
-    .expect("create temp dir");
+let mut builder = TempDirectoryBuilder::default();
+builder.add_text_file("data/file.txt", "content");
+builder.add_symlink("link_to_data", "data");
+builder.add_symlink("link_to_file", "data/file.txt");
+let temp_dir = builder.build().expect("create temp dir");
+```
+<!-- </snip> -->
+
+`add_symlink_to` targets an entry already declared on this builder instead of
+a path, so a renamed or removed target is a compile error at the call site
+rather than a silently dangling link:
+
+<!-- <snip id="example-add-symlink-to" inject_from="code" strip_prefix="    /// " template="rust"> -->
+```rust
+use temp_dir_builder::TempDirectoryBuilder;
+let mut builder = TempDirectoryBuilder::default();
+let data = builder.add_directory("data");
+builder.add_symlink_to("link_to_data", &data);
+let temp_dir = builder.build().expect("create temp dir");
 ```
 <!-- </snip> -->
 
@@ -94,13 +120,16 @@ OS relative to the link's parent directory:
 <!-- <snip id="example-add-relative-symlink" inject_from="code" strip_prefix="    /// " template="rust"> -->
 ```rust
 use temp_dir_builder::TempDirectoryBuilder;
-let temp_dir = TempDirectoryBuilder::default()
-    .add_text_file("data/file.txt", "content")
-    .add_relative_symlink("dir/link", "../data")
-    .build()
-    .expect("create temp dir");
+let mut builder = TempDirectoryBuilder::default();
+builder.add_text_file("data/file.txt", "content");
+builder.add_relative_symlink("dir/link", "../data");
+let temp_dir = builder.build().expect("create temp dir");
 ```
 <!-- </snip> -->
+
+## Migrating from 0.3.0
+
+`add_*` methods used to consume and return `self`/`EntryBuilder`, so trees were built as one chained expression. As of 0.4.0 they take `&mut self` and return an `EntryKey` instead, so that key can later resolve the entry's path or configure its permissions without re-typing its declared path. 0.3.0-style chains (`TempDirectoryBuilder::default().add_text_file(..).build()`) no longer compile; declare the builder with `let mut builder = ...` and call each method as its own statement, as shown above.
 
 ## Development
 
