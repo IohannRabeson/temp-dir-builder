@@ -153,6 +153,8 @@ pub struct TempDirectoryBuilder<'a> {
     entries: Vec<Entry<'a>>,
     /// Flag indicating whether the temporary directory created must be deleted when the instance is dropped.
     delete_on_drop: bool,
+    /// Path prepended to every entry declared through `add`, set for the duration of an `in_directory` call.
+    prefix: PathBuf,
 }
 
 impl Default for TempDirectoryBuilder<'_> {
@@ -162,6 +164,7 @@ impl Default for TempDirectoryBuilder<'_> {
             entries: vec![],
             root: Root::Random,
             delete_on_drop: true,
+            prefix: PathBuf::new(),
         }
     }
 }
@@ -304,7 +307,7 @@ impl<'a> TempDirectoryBuilder<'a> {
     }
 
     fn add(&mut self, path: impl AsRef<Path>, kind: Kind<'a>) -> EntryKey {
-        let path = path.as_ref().to_path_buf();
+        let path = self.prefix.join(path);
         let key_path = path.clean().into_boxed_path();
         let index = self.entries.len();
 
@@ -335,6 +338,44 @@ impl<'a> TempDirectoryBuilder<'a> {
     ///   If the path is outside the created directory (e.g: "../foo") the error `BuildError::EntryOutsideDirectory` will be returned.
     pub fn add_directory(&mut self, path: impl AsRef<Path>) -> EntryKey {
         self.add(path, Kind::Directory)
+    }
+
+    /// Declares entries relative to a directory already declared on this
+    /// builder, so a nested tree names each directory once. The keys
+    /// returned inside the closure are ordinary keys holding the full path
+    /// from the root, usable with `path_of`, `add_symlink_to` and the
+    /// `set_*` methods exactly like any other key. `in_directory` calls can
+    /// nest.
+    ///
+    /// # Panics
+    /// Panics if `directory` was not returned by this builder.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    // <snip id="example-in-directory">
+    /// use temp_dir_builder::TempDirectoryBuilder;
+    /// let mut builder = TempDirectoryBuilder::default();
+    /// let repository = builder.add_directory("repository");
+    /// let gitignore = builder.in_directory(&repository, |builder| {
+    ///     builder.add_empty_file("a");
+    ///     builder.add_text_file(".gitignore", "a\n")
+    /// });
+    /// let temp_dir = builder.build().expect("create temp dir");
+    /// assert_eq!(temp_dir.path_of(&gitignore), temp_dir.join("repository/.gitignore"));
+    // </snip>
+    /// ```
+    pub fn in_directory<F, R>(&mut self, directory: &EntryKey, declare: F) -> R
+    where
+        F: FnOnce(&mut Self) -> R,
+    {
+        self.assert_owns(directory);
+
+        let previous = std::mem::replace(&mut self.prefix, directory.path.to_path_buf());
+        let result = declare(self);
+        self.prefix = previous;
+
+        result
     }
 
     /// Adds a text file specifying the content.
@@ -1544,6 +1585,118 @@ mod tests {
             std::fs::read_link(temp_dir.path().join("link")).unwrap(),
             temp_dir.path_of(&data)
         );
+    }
+
+    #[test]
+    fn test_in_directory_entry_lands_under_directory() {
+        let mut builder = TempDirectoryBuilder::default();
+        let repository = builder.add_directory("repository");
+        let gitignore = builder.in_directory(&repository, |builder| {
+            builder.add_text_file(".gitignore", "a\n")
+        });
+        let temp_dir = builder.build().unwrap();
+
+        assert_eq!(
+            temp_dir.path_of(&gitignore),
+            temp_dir.join("repository/.gitignore")
+        );
+    }
+
+    #[test]
+    fn test_in_directory_nested_calls_compose() {
+        let mut builder = TempDirectoryBuilder::default();
+        let outer = builder.add_directory("outer");
+        let leaf = builder.in_directory(&outer, |builder| {
+            let inner = builder.add_directory("inner");
+            builder.in_directory(&inner, |builder| builder.add_empty_file("leaf"))
+        });
+        let temp_dir = builder.build().unwrap();
+
+        assert_eq!(temp_dir.path_of(&leaf), temp_dir.join("outer/inner/leaf"));
+    }
+
+    #[test]
+    fn test_in_directory_outer_prefix_restored_after_inner_scope() {
+        let mut builder = TempDirectoryBuilder::default();
+        let outer = builder.add_directory("outer");
+        let sibling_of_inner = builder.in_directory(&outer, |builder| {
+            let inner = builder.add_directory("inner");
+            builder.in_directory(&inner, |builder| {
+                builder.add_empty_file("leaf");
+            });
+            builder.add_empty_file("sibling_of_inner")
+        });
+        let temp_dir = builder.build().unwrap();
+
+        assert_eq!(
+            temp_dir.path_of(&sibling_of_inner),
+            temp_dir.join("outer/sibling_of_inner")
+        );
+    }
+
+    #[test]
+    fn test_add_after_in_directory_returns_is_relative_to_root() {
+        let mut builder = TempDirectoryBuilder::default();
+        let dir = builder.add_directory("dir");
+        builder.in_directory(&dir, |builder| {
+            builder.add_empty_file("inside");
+        });
+        let root_level = builder.add_empty_file("root_level");
+        let temp_dir = builder.build().unwrap();
+
+        assert_eq!(temp_dir.path_of(&root_level), temp_dir.join("root_level"));
+    }
+
+    #[test]
+    fn test_in_directory_key_accepted_by_set_readonly_and_add_symlink_to() {
+        let mut builder = TempDirectoryBuilder::default();
+        let repository = builder.add_directory("repository");
+        let file = builder.in_directory(&repository, |builder| {
+            let file = builder.add_text_file(".gitignore", "a\n");
+            builder.set_readonly(&file, true);
+            file
+        });
+        builder.add_symlink_to("link", &file);
+        let temp_dir = builder.build().unwrap();
+
+        assert!(
+            std::fs::metadata(temp_dir.path_of(&file))
+                .unwrap()
+                .permissions()
+                .readonly()
+        );
+        assert_eq!(
+            std::fs::read_link(temp_dir.path().join("link")).unwrap(),
+            temp_dir.path_of(&file)
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "does not belong to this builder")]
+    fn test_in_directory_with_foreign_key_panics() {
+        let mut other = TempDirectoryBuilder::default();
+        let foreign = other.add_directory("elsewhere");
+
+        let mut builder = TempDirectoryBuilder::default();
+        builder.in_directory(&foreign, |builder| {
+            builder.add_empty_file("never");
+        });
+    }
+
+    #[test]
+    fn test_in_directory_relative_symlink_target_resolves_against_root() {
+        let mut builder = TempDirectoryBuilder::default();
+        builder.add_text_file("data/file.txt", "content");
+        let repository = builder.add_directory("repository");
+        builder.in_directory(&repository, |builder| {
+            builder.add_symlink("link_to_data", "data");
+        });
+        let temp_dir = builder.build().unwrap();
+
+        let link_path = temp_dir.path().join("repository/link_to_data");
+        let target = std::fs::read_link(&link_path).unwrap();
+
+        assert_eq!(target, temp_dir.path().join("data"));
     }
 
     #[test]

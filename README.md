@@ -66,6 +66,25 @@ assert_eq!(repository_path, temp_dir.join("repository"));
 ```
 <!-- </snip> -->
 
+An entry nested under a directory already declared on the builder can be
+declared with `in_directory` instead of naming that directory again in every
+child's path:
+
+<!-- <snip id="example-in-directory" inject_from="code" strip_prefix="    /// " template="rust"> -->
+```rust
+use temp_dir_builder::TempDirectoryBuilder;
+let mut builder = TempDirectoryBuilder::default();
+let repository = builder.add_directory("repository");
+let gitignore = builder.in_directory(&repository, |builder| {
+    builder.add_empty_file("a");
+    builder.add_text_file(".gitignore", "a
+")
+});
+let temp_dir = builder.build().expect("create temp dir");
+assert_eq!(temp_dir.path_of(&gitignore), temp_dir.join("repository/.gitignore"));
+```
+<!-- </snip> -->
+
 On Unix platforms, `set_mode` can be used to set the raw permission bits:
 
 <!-- <snip id="example-set-mode" inject_from="code" strip_prefix="    /// " template="rust"> -->
