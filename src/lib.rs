@@ -149,22 +149,19 @@ pub enum BuildError {
 pub struct TempDirectoryBuilder<'a> {
     /// Root folder where the tree will be created.
     root: Root,
-    /// List of file metadata entries in the tree.
-    entries: Vec<Entry<'a>>,
+    /// Entries declared on this builder.
+    entries: Entries<'a>,
     /// Flag indicating whether the temporary directory created must be deleted when the instance is dropped.
     delete_on_drop: bool,
-    /// Path prepended to every entry declared through `add`, set for the duration of an `in_directory` call.
-    prefix: PathBuf,
 }
 
 impl Default for TempDirectoryBuilder<'_> {
     /// Creates a default `TempDirectoryBuilder` instance with an empty file list,
     fn default() -> Self {
         Self {
-            entries: vec![],
+            entries: Entries::default(),
             root: Root::Random,
             delete_on_drop: true,
-            prefix: PathBuf::new(),
         }
     }
 }
@@ -240,7 +237,7 @@ impl<'a> TempDirectoryBuilder<'a> {
     // </snip>
     /// ```
     pub fn set_readonly(&mut self, key: &EntryKey, readonly: bool) {
-        self.entry_mut(key).readonly = Some(readonly);
+        self.entries.set_readonly(key, readonly);
     }
 
     /// Sets whether an entry is executable. On Unix this sets the owner
@@ -261,7 +258,7 @@ impl<'a> TempDirectoryBuilder<'a> {
     // </snip>
     /// ```
     pub fn set_executable(&mut self, key: &EntryKey, executable: bool) {
-        self.entry_mut(key).executable = Some(executable);
+        self.entries.set_executable(key, executable);
     }
 
     /// Sets the Unix permission bits of an entry, e.g. `0o744`.
@@ -288,56 +285,21 @@ impl<'a> TempDirectoryBuilder<'a> {
     /// ```
     #[cfg(unix)]
     pub fn set_mode(&mut self, key: &EntryKey, mode: u32) {
-        self.entry_mut(key).mode = Some(mode);
-    }
-
-    fn assert_owns(&self, key: &EntryKey) {
-        assert!(
-            self.entries
-                .get(key.index)
-                .is_some_and(|entry| entry.path.clean().as_path() == &*key.path),
-            "EntryKey for '{}' does not belong to this builder",
-            key.path.display()
-        );
-    }
-
-    fn entry_mut(&mut self, key: &EntryKey) -> &mut Entry<'a> {
-        self.assert_owns(key);
-        &mut self.entries[key.index]
-    }
-
-    fn add(&mut self, path: impl AsRef<Path>, kind: Kind<'a>) -> EntryKey {
-        let path = self.prefix.join(path);
-        let key_path = path.clean().into_boxed_path();
-        let index = self.entries.len();
-
-        self.entries.push(Entry {
-            path,
-            kind,
-            readonly: None,
-            executable: None,
-            #[cfg(unix)]
-            mode: None,
-        });
-
-        EntryKey {
-            index,
-            path: key_path,
-        }
+        self.entries.set_mode(key, mode);
     }
 
     /// Adds an empty file.
     /// * `path` - Path of the file to create. This path must be relative to the created directory. If the path is outside
     ///   the created directory (e.g: "../foo") the error `BuildError::EntryOutsideDirectory` will be returned.
     pub fn add_empty_file<P: AsRef<Path>>(&mut self, path: P) -> EntryKey {
-        self.add(path, Kind::EmptyFile)
+        self.entries.add_empty_file(path)
     }
 
     /// Adds a directory.
     /// * `path` - Path of the directory to create. This path must be relative to the created directory.
     ///   If the path is outside the created directory (e.g: "../foo") the error `BuildError::EntryOutsideDirectory` will be returned.
     pub fn add_directory(&mut self, path: impl AsRef<Path>) -> EntryKey {
-        self.add(path, Kind::Directory)
+        self.entries.add_directory(path)
     }
 
     /// Declares entries relative to a directory already declared on this
@@ -369,11 +331,11 @@ impl<'a> TempDirectoryBuilder<'a> {
     where
         F: FnOnce(&mut Self) -> R,
     {
-        self.assert_owns(directory);
+        self.entries.assert_owns(directory);
 
-        let previous = std::mem::replace(&mut self.prefix, directory.path.to_path_buf());
+        let previous = std::mem::replace(&mut self.entries.prefix, directory.path.to_path_buf());
         let result = declare(self);
-        self.prefix = previous;
+        self.entries.prefix = previous;
 
         result
     }
@@ -383,7 +345,7 @@ impl<'a> TempDirectoryBuilder<'a> {
     ///   If the path is outside the created directory (e.g: "../foo") the error `BuildError::EntryOutsideDirectory` will be returned.
     /// * `text` - Text to be written in the new file created.
     pub fn add_text_file(&mut self, path: impl AsRef<Path>, text: impl Into<String>) -> EntryKey {
-        self.add(path, Kind::TextFile(text.into()))
+        self.entries.add_text_file(path, text)
     }
 
     /// Adds a binary file specifying the content.
@@ -391,7 +353,7 @@ impl<'a> TempDirectoryBuilder<'a> {
     ///   If the path is outside the created directory (e.g: "../foo") the error `BuildError::EntryOutsideDirectory` will be returned.
     /// * `content` - The bytes to be written in the new file created.
     pub fn add_binary_file(&mut self, path: impl AsRef<Path>, content: &[u8]) -> EntryKey {
-        self.add(path, Kind::BinaryFile(content.to_vec()))
+        self.entries.add_binary_file(path, content)
     }
 
     /// Adds a text file whose content is computed from the root path of the
@@ -417,7 +379,7 @@ impl<'a> TempDirectoryBuilder<'a> {
     where
         F: Fn(&Path) -> String + 'a,
     {
-        self.add(path, Kind::TextFileWith(Box::new(content)))
+        self.entries.add_text_file_with(path, content)
     }
 
     /// Adds a file specifying a source file to be copied.
@@ -425,7 +387,7 @@ impl<'a> TempDirectoryBuilder<'a> {
     ///   If the path is outside the created directory (e.g: "../foo") the error `BuildError::EntryOutsideDirectory` will be returned.
     /// * `file` - Path of the file to be copied. If relative, it is resolved against the current working directory.
     pub fn add_file(&mut self, path: impl AsRef<Path>, file: impl AsRef<Path>) -> EntryKey {
-        self.add(path, Kind::FileToCopy(file.as_ref().to_path_buf()))
+        self.entries.add_file(path, file)
     }
 
     /// Adds a symbolic link.
@@ -451,7 +413,7 @@ impl<'a> TempDirectoryBuilder<'a> {
     // </snip>
     /// ```
     pub fn add_symlink(&mut self, path: impl AsRef<Path>, target: impl AsRef<Path>) -> EntryKey {
-        self.add(path, Kind::Symlink(target.as_ref().to_path_buf()))
+        self.entries.add_symlink(path, target)
     }
 
     /// Adds a symbolic link targeting an entry already declared on this
@@ -480,8 +442,7 @@ impl<'a> TempDirectoryBuilder<'a> {
     // </snip>
     /// ```
     pub fn add_symlink_to(&mut self, path: impl AsRef<Path>, target: &EntryKey) -> EntryKey {
-        self.assert_owns(target);
-        self.add(path, Kind::Symlink(target.path.to_path_buf()))
+        self.entries.add_symlink_to(path, target)
     }
 
     /// Adds a symbolic link whose target is written verbatim, interpreted by
@@ -507,7 +468,7 @@ impl<'a> TempDirectoryBuilder<'a> {
         path: impl AsRef<Path>,
         target: impl AsRef<Path>,
     ) -> EntryKey {
-        self.add(path, Kind::RelativeSymlink(target.as_ref().to_path_buf()))
+        self.entries.add_relative_symlink(path, target)
     }
 
     /// Adds a symbolic link pointing at a target that doesn't exist yet,
@@ -525,7 +486,7 @@ impl<'a> TempDirectoryBuilder<'a> {
         path: impl AsRef<Path>,
         target: impl AsRef<Path>,
     ) -> EntryKey {
-        self.add(path, Kind::SymlinkDir(target.as_ref().to_path_buf()))
+        self.entries.add_symlink_dir(path, target)
     }
 
     /// Adds a symbolic link pointing at a target that doesn't exist yet,
@@ -543,7 +504,7 @@ impl<'a> TempDirectoryBuilder<'a> {
         path: impl AsRef<Path>,
         target: impl AsRef<Path>,
     ) -> EntryKey {
-        self.add(path, Kind::SymlinkFile(target.as_ref().to_path_buf()))
+        self.entries.add_symlink_file(path, target)
     }
 
     /// Builds the file tree by generating files and directories based on the
@@ -566,42 +527,452 @@ impl<'a> TempDirectoryBuilder<'a> {
             Root::RandomIn(base) => create_random_temp_directory(base)?,
         };
 
-        let mut created_paths = Vec::with_capacity(self.entries.len());
-
-        for (entry_index, entry) in self.entries.iter().enumerate() {
-            if entry.path.as_os_str().is_empty() {
-                return Err(BuildError::EmptyEntryName(entry_index));
-            }
-
-            let entry_path = root.join(&entry.path).clean();
-
-            if !entry_path.starts_with(&root) {
-                return Err(BuildError::EntryOutsideDirectory(entry.path.clone()));
-            }
-
-            if std::fs::symlink_metadata(&entry_path).is_ok() {
-                return Err(BuildError::DuplicateEntry(entry_path));
-            }
-
-            if let Some(parent_dir) = Path::new(&entry_path).parent() {
-                std::fs::create_dir_all(parent_dir).map_err(|err| {
-                    BuildError::FailedToCreateDirectory(parent_dir.to_path_buf(), err)
-                })?;
-            }
-
-            create_entry(&root, &entry_path, &entry.kind)?;
-            created_paths.push(entry_path);
-        }
-
-        for (entry, entry_path) in self.entries.iter().zip(created_paths) {
-            apply_permissions(&entry_path, entry)?;
-        }
+        build_entries(&root, &self.entries.list, CollisionPolicy::RejectAll)?;
 
         Ok(TempDirectory {
             path: root,
             delete_on_drop: self.delete_on_drop,
         })
     }
+}
+
+/// Entries declared so far, shared by `TempDirectoryBuilder` and
+/// `TempDirectoryOverlay`.
+#[derive(Debug, Default)]
+struct Entries<'a> {
+    /// List of file metadata entries in the tree.
+    list: Vec<Entry<'a>>,
+    /// Path prepended to every entry declared through `add`, set for the duration of an `in_directory` call.
+    prefix: PathBuf,
+}
+
+impl<'a> Entries<'a> {
+    fn assert_owns(&self, key: &EntryKey) {
+        assert!(
+            self.list
+                .get(key.index)
+                .is_some_and(|entry| entry.path.clean().as_path() == &*key.path),
+            "EntryKey for '{}' does not belong to this builder",
+            key.path.display()
+        );
+    }
+
+    fn entry_mut(&mut self, key: &EntryKey) -> &mut Entry<'a> {
+        self.assert_owns(key);
+        &mut self.list[key.index]
+    }
+
+    fn add(&mut self, path: impl AsRef<Path>, kind: Kind<'a>) -> EntryKey {
+        let path = self.prefix.join(path);
+        let key_path = path.clean().into_boxed_path();
+        let index = self.list.len();
+
+        self.list.push(Entry {
+            path,
+            kind,
+            readonly: None,
+            executable: None,
+            #[cfg(unix)]
+            mode: None,
+        });
+
+        EntryKey {
+            index,
+            path: key_path,
+        }
+    }
+
+    fn add_empty_file(&mut self, path: impl AsRef<Path>) -> EntryKey {
+        self.add(path, Kind::EmptyFile)
+    }
+
+    fn add_directory(&mut self, path: impl AsRef<Path>) -> EntryKey {
+        self.add(path, Kind::Directory)
+    }
+
+    fn add_text_file(&mut self, path: impl AsRef<Path>, text: impl Into<String>) -> EntryKey {
+        self.add(path, Kind::TextFile(text.into()))
+    }
+
+    fn add_binary_file(&mut self, path: impl AsRef<Path>, content: &[u8]) -> EntryKey {
+        self.add(path, Kind::BinaryFile(content.to_vec()))
+    }
+
+    fn add_text_file_with<F>(&mut self, path: impl AsRef<Path>, content: F) -> EntryKey
+    where
+        F: Fn(&Path) -> String + 'a,
+    {
+        self.add(path, Kind::TextFileWith(Box::new(content)))
+    }
+
+    fn add_file(&mut self, path: impl AsRef<Path>, file: impl AsRef<Path>) -> EntryKey {
+        self.add(path, Kind::FileToCopy(file.as_ref().to_path_buf()))
+    }
+
+    fn add_symlink(&mut self, path: impl AsRef<Path>, target: impl AsRef<Path>) -> EntryKey {
+        self.add(path, Kind::Symlink(target.as_ref().to_path_buf()))
+    }
+
+    fn add_symlink_to(&mut self, path: impl AsRef<Path>, target: &EntryKey) -> EntryKey {
+        self.assert_owns(target);
+        self.add(path, Kind::Symlink(target.path.to_path_buf()))
+    }
+
+    fn add_relative_symlink(
+        &mut self,
+        path: impl AsRef<Path>,
+        target: impl AsRef<Path>,
+    ) -> EntryKey {
+        self.add(path, Kind::RelativeSymlink(target.as_ref().to_path_buf()))
+    }
+
+    #[cfg(windows)]
+    fn add_symlink_dir(&mut self, path: impl AsRef<Path>, target: impl AsRef<Path>) -> EntryKey {
+        self.add(path, Kind::SymlinkDir(target.as_ref().to_path_buf()))
+    }
+
+    #[cfg(windows)]
+    fn add_symlink_file(&mut self, path: impl AsRef<Path>, target: impl AsRef<Path>) -> EntryKey {
+        self.add(path, Kind::SymlinkFile(target.as_ref().to_path_buf()))
+    }
+
+    fn set_readonly(&mut self, key: &EntryKey, readonly: bool) {
+        self.entry_mut(key).readonly = Some(readonly);
+    }
+
+    fn set_executable(&mut self, key: &EntryKey, executable: bool) {
+        self.entry_mut(key).executable = Some(executable);
+    }
+
+    #[cfg(unix)]
+    fn set_mode(&mut self, key: &EntryKey, mode: u32) {
+        self.entry_mut(key).mode = Some(mode);
+    }
+}
+
+/// Declares entries to create inside a directory that already exists.
+///
+/// Unlike `TempDirectoryBuilder`, there is no root to configure and no
+/// temporary directory to delete on drop: `TempDirectoryOverlay` only ever
+/// writes into a `TempDirectory` someone else already built and owns. It has
+/// no `root_folder`, `random_root_in`, or `delete_on_drop` methods, so a
+/// builder meant for `build()` that was reused here by mistake fails to
+/// compile instead of having those calls silently ignored:
+///
+/// ```compile_fail
+/// use temp_dir_builder::TempDirectoryOverlay;
+/// TempDirectoryOverlay::default().root_folder("/tmp/somewhere");
+/// ```
+///
+/// ```compile_fail
+/// use temp_dir_builder::TempDirectoryOverlay;
+/// TempDirectoryOverlay::default().random_root_in("/tmp/somewhere");
+/// ```
+///
+/// ```compile_fail
+/// use temp_dir_builder::TempDirectoryOverlay;
+/// TempDirectoryOverlay::default().delete_on_drop(false);
+/// ```
+#[derive(Debug, Default)]
+pub struct TempDirectoryOverlay<'a> {
+    entries: Entries<'a>,
+}
+
+impl<'a> TempDirectoryOverlay<'a> {
+    /// Adds an empty file.
+    /// * `path` - Path of the file to create. This path must be relative to `directory`. If the path is outside
+    ///   it (e.g: "../foo") the error `BuildError::EntryOutsideDirectory` will be returned.
+    pub fn add_empty_file<P: AsRef<Path>>(&mut self, path: P) -> EntryKey {
+        self.entries.add_empty_file(path)
+    }
+
+    /// Adds a directory.
+    /// * `path` - Path of the directory to create. This path must be relative to `directory`.
+    ///   If the path is outside it (e.g: "../foo") the error `BuildError::EntryOutsideDirectory` will be returned.
+    pub fn add_directory(&mut self, path: impl AsRef<Path>) -> EntryKey {
+        self.entries.add_directory(path)
+    }
+
+    /// Declares entries relative to a directory already declared on this
+    /// overlay, so a nested tree names each directory once. The keys
+    /// returned inside the closure are ordinary keys holding the full path
+    /// from `directory`'s root, usable with `path_of`, `add_symlink_to` and
+    /// the `set_*` methods exactly like any other key. `in_directory` calls
+    /// can nest.
+    ///
+    /// # Panics
+    /// Panics if `directory` was not returned by this overlay.
+    pub fn in_directory<F, R>(&mut self, directory: &EntryKey, declare: F) -> R
+    where
+        F: FnOnce(&mut Self) -> R,
+    {
+        self.entries.assert_owns(directory);
+
+        let previous = std::mem::replace(&mut self.entries.prefix, directory.path.to_path_buf());
+        let result = declare(self);
+        self.entries.prefix = previous;
+
+        result
+    }
+
+    /// Adds a text file specifying the content.
+    /// * `path` - Path of the text file to create. This path must be relative to `directory`.
+    ///   If the path is outside it (e.g: "../foo") the error `BuildError::EntryOutsideDirectory` will be returned.
+    /// * `text` - Text to be written in the new file created.
+    pub fn add_text_file(&mut self, path: impl AsRef<Path>, text: impl Into<String>) -> EntryKey {
+        self.entries.add_text_file(path, text)
+    }
+
+    /// Adds a binary file specifying the content.
+    /// * `path` - Path of the binary file to create. This path must be relative to `directory`.
+    ///   If the path is outside it (e.g: "../foo") the error `BuildError::EntryOutsideDirectory` will be returned.
+    /// * `content` - The bytes to be written in the new file created.
+    pub fn add_binary_file(&mut self, path: impl AsRef<Path>, content: &[u8]) -> EntryKey {
+        self.entries.add_binary_file(path, content)
+    }
+
+    /// Adds a text file whose content is computed from the root of
+    /// `directory` when `build_into()` runs.
+    /// * `path` - Path of the text file to create. This path must be relative to `directory`.
+    ///   If the path is outside it (e.g: "../foo") the error `BuildError::EntryOutsideDirectory` will be returned.
+    /// * `content` - Called with the root of `directory` to produce the text to be written in the new file created.
+    pub fn add_text_file_with<F>(&mut self, path: impl AsRef<Path>, content: F) -> EntryKey
+    where
+        F: Fn(&Path) -> String + 'a,
+    {
+        self.entries.add_text_file_with(path, content)
+    }
+
+    /// Adds a file specifying a source file to be copied.
+    /// * `path` - Path of the file to create. This path must be relative to `directory`.
+    ///   If the path is outside it (e.g: "../foo") the error `BuildError::EntryOutsideDirectory` will be returned.
+    /// * `file` - Path of the file to be copied. If relative, it is resolved against the current working directory.
+    pub fn add_file(&mut self, path: impl AsRef<Path>, file: impl AsRef<Path>) -> EntryKey {
+        self.entries.add_file(path, file)
+    }
+
+    /// Adds a symbolic link.
+    ///
+    /// * `path` - Path of the link, relative to `directory`.
+    /// * `target` - Target of the link. A relative target is resolved against
+    ///   `directory`'s root and written as an absolute path; an absolute
+    ///   target is written verbatim. The target does not have to exist, nor
+    ///   be inside `directory`. Use `add_relative_symlink` to write the
+    ///   target verbatim instead, or `add_symlink_to` when the target is an
+    ///   entry already declared on this overlay.
+    pub fn add_symlink(&mut self, path: impl AsRef<Path>, target: impl AsRef<Path>) -> EntryKey {
+        self.entries.add_symlink(path, target)
+    }
+
+    /// Adds a symbolic link targeting an entry already declared on this
+    /// overlay.
+    ///
+    /// Unlike `add_symlink`, `target` can only be an `EntryKey`, so a target
+    /// that was renamed or removed is a compile error at the call site, not a
+    /// silently dangling link. Use `add_symlink` instead when the target is
+    /// meant to be dangling or to live outside `directory`.
+    ///
+    /// * `path` - Path of the link, relative to `directory`.
+    /// * `target` - Key of the entry to link to, as returned by an `add_*` method.
+    ///
+    /// # Panics
+    /// Panics if `target` was not returned by this overlay.
+    pub fn add_symlink_to(&mut self, path: impl AsRef<Path>, target: &EntryKey) -> EntryKey {
+        self.entries.add_symlink_to(path, target)
+    }
+
+    /// Adds a symbolic link whose target is written verbatim, interpreted by
+    /// the OS relative to the link's parent directory.
+    ///
+    /// * `path` - Path of the link, relative to `directory`.
+    /// * `target` - Target of the link, written as-is. The target does not
+    ///   have to exist, nor be inside `directory`.
+    pub fn add_relative_symlink(
+        &mut self,
+        path: impl AsRef<Path>,
+        target: impl AsRef<Path>,
+    ) -> EntryKey {
+        self.entries.add_relative_symlink(path, target)
+    }
+
+    /// Adds a symbolic link pointing at a target that doesn't exist yet,
+    /// explicitly created as a directory link.
+    ///
+    /// Only needed when `target` is dangling: `add_symlink` inspects an
+    /// existing target to pick file vs. directory automatically.
+    ///
+    /// # Errors
+    /// Creating symlinks on Windows requires developer mode or elevated
+    /// privileges.
+    #[cfg(windows)]
+    pub fn add_symlink_dir(
+        &mut self,
+        path: impl AsRef<Path>,
+        target: impl AsRef<Path>,
+    ) -> EntryKey {
+        self.entries.add_symlink_dir(path, target)
+    }
+
+    /// Adds a symbolic link pointing at a target that doesn't exist yet,
+    /// explicitly created as a file link.
+    ///
+    /// Only needed when `target` is dangling: `add_symlink` inspects an
+    /// existing target to pick file vs. directory automatically.
+    ///
+    /// # Errors
+    /// Creating symlinks on Windows requires developer mode or elevated
+    /// privileges.
+    #[cfg(windows)]
+    pub fn add_symlink_file(
+        &mut self,
+        path: impl AsRef<Path>,
+        target: impl AsRef<Path>,
+    ) -> EntryKey {
+        self.entries.add_symlink_file(path, target)
+    }
+
+    /// Sets whether an entry is read-only.
+    ///
+    /// # Panics
+    /// Panics if `key` was not returned by this overlay.
+    pub fn set_readonly(&mut self, key: &EntryKey, readonly: bool) {
+        self.entries.set_readonly(key, readonly);
+    }
+
+    /// Sets whether an entry is executable. On Unix this sets the owner
+    /// execute bit; on other platforms it does nothing.
+    ///
+    /// # Panics
+    /// Panics if `key` was not returned by this overlay.
+    pub fn set_executable(&mut self, key: &EntryKey, executable: bool) {
+        self.entries.set_executable(key, executable);
+    }
+
+    /// Sets the Unix permission bits of an entry, e.g. `0o744`.
+    ///
+    /// # Panics
+    /// Panics if `key` was not returned by this overlay.
+    #[cfg(unix)]
+    pub fn set_mode(&mut self, key: &EntryKey, mode: u32) {
+        self.entries.set_mode(key, mode);
+    }
+
+    /// Creates the declared entries inside `directory`, which already
+    /// exists.
+    ///
+    /// Unlike `TempDirectoryBuilder::build()`, a declared entry may collide
+    /// with something already on disk. It succeeds only when the two agree
+    /// on what should be there: a declared file over an existing regular
+    /// file replaces its content, and a declared directory over an existing
+    /// directory is reused as-is. Every other collision, including a
+    /// declared file or symlink over an existing directory, a declared
+    /// directory over an existing file, or anything over an existing
+    /// symlink, is `DuplicateEntry`. Anything present and not declared is
+    /// left untouched.
+    ///
+    /// Every entry is checked against the rule above before anything is
+    /// created or overwritten, so a `DuplicateEntry` from one entry never
+    /// leaves an earlier entry's target mutated.
+    ///
+    /// # Errors
+    /// A `BuildError` is returned in case of error.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use temp_dir_builder::{TempDirectoryBuilder, TempDirectoryOverlay};
+    /// let mut builder = TempDirectoryBuilder::default();
+    /// let repository = builder.add_directory("repository");
+    /// let temp_dir = builder.build().expect("create temp dir");
+    ///
+    /// let mut overlay = TempDirectoryOverlay::default();
+    /// let gitignore = overlay.add_text_file("repository/.gitignore", "*.log\n");
+    /// overlay.build_into(&temp_dir).expect("extend temp dir");
+    /// assert!(temp_dir.path_of(&gitignore).is_file());
+    /// ```
+    pub fn build_into(&self, directory: &TempDirectory) -> Result<(), BuildError> {
+        build_entries(
+            directory.path(),
+            &self.entries.list,
+            CollisionPolicy::ReuseMatching,
+        )
+    }
+}
+
+#[derive(Clone, Copy)]
+enum CollisionPolicy {
+    RejectAll,
+    ReuseMatching,
+}
+
+fn build_entries(
+    root: &Path,
+    entries: &[Entry<'_>],
+    collisions: CollisionPolicy,
+) -> Result<(), BuildError> {
+    let mut plan = Vec::with_capacity(entries.len());
+
+    for (entry_index, entry) in entries.iter().enumerate() {
+        if entry.path.as_os_str().is_empty() {
+            return Err(BuildError::EmptyEntryName(entry_index));
+        }
+
+        let entry_path = root.join(&entry.path).clean();
+
+        if !entry_path.starts_with(root) {
+            return Err(BuildError::EntryOutsideDirectory(entry.path.clone()));
+        }
+
+        // Two entries declared at the same path in the same batch always
+        // collide, regardless of `collisions`: that policy only relaxes
+        // what an entry may find already on disk, not what this builder
+        // declared twice.
+        if plan.iter().any(|(planned, _)| *planned == entry_path) {
+            return Err(BuildError::DuplicateEntry(entry_path));
+        }
+
+        let reuse = match std::fs::symlink_metadata(&entry_path) {
+            Ok(metadata) => match collisions {
+                CollisionPolicy::RejectAll => return Err(BuildError::DuplicateEntry(entry_path)),
+                // Order matters: `Directory` must be checked before the
+                // symlink-kind arm (it is never a symlink kind, but it must
+                // not fall into the generic file arm below), and the
+                // symlink-kind arm must be checked before the generic file
+                // arm (a symlink kind over an existing regular file must
+                // stay a `DuplicateEntry`, not be treated as an overwrite).
+                CollisionPolicy::ReuseMatching => match &entry.kind {
+                    Kind::Directory if metadata.file_type().is_dir() => true,
+                    Kind::Directory => return Err(BuildError::DuplicateEntry(entry_path)),
+                    kind if kind.is_symlink() => {
+                        return Err(BuildError::DuplicateEntry(entry_path));
+                    }
+                    _ if metadata.file_type().is_file() => false,
+                    _ => return Err(BuildError::DuplicateEntry(entry_path)),
+                },
+            },
+            Err(_) => false,
+        };
+
+        plan.push((entry_path, reuse));
+    }
+
+    for (entry, (entry_path, reuse)) in entries.iter().zip(&plan) {
+        if let Some(parent_dir) = entry_path.parent() {
+            std::fs::create_dir_all(parent_dir).map_err(|err| {
+                BuildError::FailedToCreateDirectory(parent_dir.to_path_buf(), err)
+            })?;
+        }
+
+        if !*reuse {
+            create_entry(root, entry_path, &entry.kind)?;
+        }
+    }
+
+    for (entry, (entry_path, _)) in entries.iter().zip(&plan) {
+        apply_permissions(entry_path, entry)?;
+    }
+
+    Ok(())
 }
 
 fn create_entry(root: &Path, entry_path: &Path, kind: &Kind<'_>) -> Result<(), BuildError> {
@@ -1864,5 +2235,208 @@ mod tests {
         let metadata = std::fs::symlink_metadata(&link_path).unwrap();
 
         assert!(metadata.file_type().is_symlink());
+    }
+
+    #[test]
+    fn test_build_into_entries_resolve_through_original_temp_dir() {
+        let mut builder = TempDirectoryBuilder::default();
+        let repository = builder.add_directory("repository");
+        let temp_dir = builder.build().unwrap();
+
+        let mut overlay = TempDirectoryOverlay::default();
+        let gitignore = overlay.add_text_file("repository/.gitignore", "*.log\n");
+        overlay.build_into(&temp_dir).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(temp_dir.path_of(&gitignore)).unwrap(),
+            "*.log\n"
+        );
+        assert_eq!(temp_dir.path_of(&repository), temp_dir.join("repository"));
+    }
+
+    #[test]
+    fn test_build_into_file_over_existing_file_replaces_content() {
+        let mut builder = TempDirectoryBuilder::default();
+        builder.add_text_file("foo.txt", "old");
+        let temp_dir = builder.build().unwrap();
+
+        let mut overlay = TempDirectoryOverlay::default();
+        overlay.add_text_file("foo.txt", "new");
+        overlay.build_into(&temp_dir).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(temp_dir.path().join("foo.txt")).unwrap(),
+            "new"
+        );
+    }
+
+    #[test]
+    fn test_build_into_directory_over_existing_directory_reuses_it() {
+        let mut builder = TempDirectoryBuilder::default();
+        builder.add_directory("dir");
+        builder.add_empty_file("dir/existing.txt");
+        let temp_dir = builder.build().unwrap();
+
+        let mut overlay = TempDirectoryOverlay::default();
+        let dir = overlay.add_directory("dir");
+        overlay.build_into(&temp_dir).unwrap();
+
+        assert!(temp_dir.path_of(&dir).is_dir());
+        assert!(temp_dir.path().join("dir/existing.txt").exists());
+    }
+
+    #[test]
+    fn test_build_into_directory_over_existing_file_is_duplicate_entry() {
+        let mut builder = TempDirectoryBuilder::default();
+        builder.add_empty_file("thing");
+        let temp_dir = builder.build().unwrap();
+
+        let mut overlay = TempDirectoryOverlay::default();
+        overlay.add_directory("thing");
+        let error = overlay.build_into(&temp_dir).unwrap_err();
+
+        assert!(matches!(error, BuildError::DuplicateEntry(_)));
+    }
+
+    #[test]
+    fn test_build_into_file_over_existing_directory_is_duplicate_entry() {
+        let mut builder = TempDirectoryBuilder::default();
+        builder.add_directory("thing");
+        builder.add_empty_file("thing/inside.txt");
+        let temp_dir = builder.build().unwrap();
+
+        let mut overlay = TempDirectoryOverlay::default();
+        overlay.add_text_file("thing", "content");
+        let error = overlay.build_into(&temp_dir).unwrap_err();
+
+        assert!(matches!(error, BuildError::DuplicateEntry(_)));
+        assert!(temp_dir.path().join("thing").is_dir());
+        assert!(temp_dir.path().join("thing/inside.txt").exists());
+    }
+
+    #[test]
+    fn test_build_into_symlink_over_existing_file_is_duplicate_entry() {
+        let mut builder = TempDirectoryBuilder::default();
+        builder.add_empty_file("link");
+        let temp_dir = builder.build().unwrap();
+
+        let mut overlay = TempDirectoryOverlay::default();
+        overlay.add_symlink("link", "target");
+        let error = overlay.build_into(&temp_dir).unwrap_err();
+
+        assert!(matches!(error, BuildError::DuplicateEntry(_)));
+    }
+
+    #[test]
+    fn test_build_into_symlink_over_existing_directory_is_duplicate_entry() {
+        let mut builder = TempDirectoryBuilder::default();
+        builder.add_directory("link");
+        let temp_dir = builder.build().unwrap();
+
+        let mut overlay = TempDirectoryOverlay::default();
+        overlay.add_symlink("link", "target");
+        let error = overlay.build_into(&temp_dir).unwrap_err();
+
+        assert!(matches!(error, BuildError::DuplicateEntry(_)));
+    }
+
+    #[test]
+    fn test_build_into_symlink_over_existing_symlink_is_duplicate_entry() {
+        let mut builder = TempDirectoryBuilder::default();
+        builder.add_symlink("link", "first-target");
+        let temp_dir = builder.build().unwrap();
+
+        let mut overlay = TempDirectoryOverlay::default();
+        overlay.add_symlink("link", "second-target");
+        let error = overlay.build_into(&temp_dir).unwrap_err();
+
+        assert!(matches!(error, BuildError::DuplicateEntry(_)));
+    }
+
+    #[test]
+    fn test_build_into_file_over_existing_symlink_is_duplicate_entry() {
+        let mut builder = TempDirectoryBuilder::default();
+        builder.add_symlink("thing", "missing");
+        let temp_dir = builder.build().unwrap();
+
+        let mut overlay = TempDirectoryOverlay::default();
+        overlay.add_text_file("thing", "content");
+        let error = overlay.build_into(&temp_dir).unwrap_err();
+
+        assert!(matches!(error, BuildError::DuplicateEntry(_)));
+    }
+
+    #[test]
+    fn test_build_into_collision_leaves_earlier_entries_untouched() {
+        let mut builder = TempDirectoryBuilder::default();
+        builder.add_text_file("first.txt", "original");
+        builder.add_directory("second");
+        let temp_dir = builder.build().unwrap();
+
+        let mut overlay = TempDirectoryOverlay::default();
+        overlay.add_text_file("first.txt", "overwritten");
+        overlay.add_text_file("second", "not a directory");
+        let error = overlay.build_into(&temp_dir).unwrap_err();
+
+        assert!(matches!(error, BuildError::DuplicateEntry(_)));
+        assert_eq!(
+            std::fs::read_to_string(temp_dir.path().join("first.txt")).unwrap(),
+            "original"
+        );
+    }
+
+    #[test]
+    fn test_build_into_entry_outside_directory() {
+        let temp_dir = TempDirectoryBuilder::default().build().unwrap();
+
+        let mut overlay = TempDirectoryOverlay::default();
+        overlay.add_empty_file("../foo");
+        let error = overlay.build_into(&temp_dir).unwrap_err();
+
+        assert!(matches!(error, BuildError::EntryOutsideDirectory(_)));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_build_into_applies_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = TempDirectoryBuilder::default().build().unwrap();
+
+        let mut overlay = TempDirectoryOverlay::default();
+        let script = overlay.add_text_file("run.sh", "#!/bin/sh");
+        overlay.set_mode(&script, 0o755);
+        overlay.build_into(&temp_dir).unwrap();
+
+        let mode = std::fs::metadata(temp_dir.path_of(&script))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o755);
+
+        let temp_dir_path = temp_dir.path().to_path_buf();
+        drop(temp_dir);
+        assert!(!temp_dir_path.exists());
+    }
+
+    #[test]
+    fn test_build_validates_before_creating_any_entry() {
+        let base = std::env::temp_dir().join(format!(
+            "test_build_validates_before_creating_any_entry_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join("second"), "existing").unwrap();
+
+        let mut builder = TempDirectoryBuilder::default();
+        builder.root_folder(&base);
+        builder.add_empty_file("first");
+        builder.add_empty_file("second");
+        let error = builder.build().unwrap_err();
+
+        assert!(matches!(error, BuildError::DuplicateEntry(_)));
+        assert!(!base.join("first").exists());
+
+        std::fs::remove_dir_all(&base).unwrap();
     }
 }
