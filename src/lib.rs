@@ -994,11 +994,32 @@ fn resolve_reuse(
     created_directories: &HashSet<PathBuf>,
     collisions: CollisionPolicy,
 ) -> Result<bool, BuildError> {
+    // Something already on disk at this point predates this build entirely
+    // (a fixed or reused root), so it must be checked before the
+    // implicit-parent case below: that case only applies when there is
+    // nothing there yet for `symlink_metadata` to catch on its own.
+    if let Ok(metadata) = std::fs::symlink_metadata(entry_path) {
+        return match collisions {
+            CollisionPolicy::RejectAll => Err(BuildError::DuplicateEntry(entry_path.to_path_buf())),
+            // Order matters: `Directory` must be checked before the
+            // symlink-kind arm (it is never a symlink kind, but it must not
+            // fall into the generic file arm below), and the symlink-kind
+            // arm must be checked before the generic file arm (a symlink
+            // kind over an existing regular file must stay a
+            // `DuplicateEntry`, not be treated as an overwrite).
+            CollisionPolicy::ReuseMatching => match kind {
+                Kind::Directory if metadata.file_type().is_dir() => Ok(true),
+                Kind::Directory => Err(BuildError::DuplicateEntry(entry_path.to_path_buf())),
+                kind if kind.is_symlink() => Err(BuildError::DuplicateEntry(entry_path.to_path_buf())),
+                _ if metadata.file_type().is_file() => Ok(false),
+                _ => Err(BuildError::DuplicateEntry(entry_path.to_path_buf())),
+            },
+        };
+    }
+
     if created_directories.contains(entry_path) {
         // A path some other entry needs as an implicit parent is only
-        // reusable by a `Kind::Directory`; nothing else can occupy it, and
-        // nothing is on disk yet at this point for `symlink_metadata` to
-        // catch that on its own.
+        // reusable by a `Kind::Directory`; nothing else can occupy it.
         return if matches!(kind, Kind::Directory) {
             Ok(true)
         } else {
@@ -1006,22 +1027,7 @@ fn resolve_reuse(
         };
     }
 
-    std::fs::symlink_metadata(entry_path).map_or(Ok(false), |metadata| match collisions {
-        CollisionPolicy::RejectAll => Err(BuildError::DuplicateEntry(entry_path.to_path_buf())),
-        // Order matters: `Directory` must be checked before the
-        // symlink-kind arm (it is never a symlink kind, but it must not
-        // fall into the generic file arm below), and the symlink-kind arm
-        // must be checked before the generic file arm (a symlink kind over
-        // an existing regular file must stay a `DuplicateEntry`, not be
-        // treated as an overwrite).
-        CollisionPolicy::ReuseMatching => match kind {
-            Kind::Directory if metadata.file_type().is_dir() => Ok(true),
-            Kind::Directory => Err(BuildError::DuplicateEntry(entry_path.to_path_buf())),
-            kind if kind.is_symlink() => Err(BuildError::DuplicateEntry(entry_path.to_path_buf())),
-            _ if metadata.file_type().is_file() => Ok(false),
-            _ => Err(BuildError::DuplicateEntry(entry_path.to_path_buf())),
-        },
-    })
+    Ok(false)
 }
 
 fn create_entry(root: &Path, entry_path: &Path, kind: &Kind<'_>) -> Result<(), BuildError> {
@@ -2565,6 +2571,50 @@ mod tests {
         let error = builder.build().unwrap_err();
 
         assert!(matches!(error, BuildError::DuplicateEntry(_)));
+
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn test_add_directory_over_existing_foreign_directory_also_needed_as_implicit_parent_is_duplicate_entry()
+     {
+        let base = std::env::temp_dir().join(format!(
+            "test_add_directory_over_existing_foreign_directory_also_needed_as_implicit_parent_is_duplicate_entry_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(base.join("a")).unwrap();
+        std::fs::write(base.join("a/marker"), "leftover").unwrap();
+
+        let mut builder = TempDirectoryBuilder::default();
+        builder.root_folder(&base);
+        builder.add_empty_file("a/b");
+        builder.add_directory("a");
+        let error = builder.build().unwrap_err();
+
+        assert!(matches!(error, BuildError::DuplicateEntry(_)));
+
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn test_add_directory_over_existing_foreign_file_also_needed_as_implicit_parent_is_duplicate_entry()
+     {
+        let base = std::env::temp_dir().join(format!(
+            "test_add_directory_over_existing_foreign_file_also_needed_as_implicit_parent_is_duplicate_entry_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join("a"), "leftover file").unwrap();
+
+        let mut builder = TempDirectoryBuilder::default();
+        builder.root_folder(&base);
+        builder.add_empty_file("unrelated.txt");
+        builder.add_empty_file("a/b/c");
+        builder.add_directory("a");
+        let error = builder.build().unwrap_err();
+
+        assert!(matches!(error, BuildError::DuplicateEntry(_)));
+        assert!(!base.join("unrelated.txt").exists());
 
         std::fs::remove_dir_all(&base).unwrap();
     }
