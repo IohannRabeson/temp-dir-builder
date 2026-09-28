@@ -1,6 +1,7 @@
 #![doc = include_str!("../README.md")]
 
 use std::{
+    collections::HashSet,
     env,
     fs::File,
     io::Write,
@@ -298,6 +299,10 @@ impl<'a> TempDirectoryBuilder<'a> {
     /// Adds a directory.
     /// * `path` - Path of the directory to create. This path must be relative to the created directory.
     ///   If the path is outside the created directory (e.g: "../foo") the error `BuildError::EntryOutsideDirectory` will be returned.
+    ///
+    /// A directory that an earlier entry already created as an implicit
+    /// parent may still be declared, in any order, to get a key for it or to
+    /// set its permissions. Declaring the same directory twice is an error.
     pub fn add_directory(&mut self, path: impl AsRef<Path>) -> EntryKey {
         self.entries.add_directory(path)
     }
@@ -689,6 +694,10 @@ impl<'a> TempDirectoryOverlay<'a> {
     /// Adds a directory.
     /// * `path` - Path of the directory to create. This path must be relative to `directory`.
     ///   If the path is outside it (e.g: "../foo") the error `BuildError::EntryOutsideDirectory` will be returned.
+    ///
+    /// A directory that an earlier entry already created as an implicit
+    /// parent may still be declared, in any order, to get a key for it or to
+    /// set its permissions. Declaring the same directory twice is an error.
     pub fn add_directory(&mut self, path: impl AsRef<Path>) -> EntryKey {
         self.entries.add_directory(path)
     }
@@ -910,7 +919,7 @@ fn build_entries(
     entries: &[Entry<'_>],
     collisions: CollisionPolicy,
 ) -> Result<(), BuildError> {
-    let mut plan = Vec::with_capacity(entries.len());
+    let mut entry_paths = Vec::with_capacity(entries.len());
 
     for (entry_index, entry) in entries.iter().enumerate() {
         if entry.path.as_os_str().is_empty() {
@@ -923,6 +932,28 @@ fn build_entries(
             return Err(BuildError::EntryOutsideDirectory(entry.path.clone()));
         }
 
+        entry_paths.push(entry_path);
+    }
+
+    // Every ancestor a declared entry's path has, short of `root`, is a
+    // directory this build's own `create_dir_all` calls will bring into
+    // existence regardless of declaration order. A `Kind::Directory` entry
+    // landing on one of these is reusing its own implicit parent, not
+    // colliding with something foreign.
+    let mut created_directories = HashSet::new();
+
+    for entry_path in &entry_paths {
+        for ancestor in entry_path.ancestors().skip(1) {
+            if ancestor == root {
+                break;
+            }
+            created_directories.insert(ancestor.to_path_buf());
+        }
+    }
+
+    let mut plan = Vec::with_capacity(entries.len());
+
+    for (entry, entry_path) in entries.iter().zip(entry_paths) {
         // Two entries declared at the same path in the same batch always
         // collide, regardless of `collisions`: that policy only relaxes
         // what an entry may find already on disk, not what this builder
@@ -931,27 +962,7 @@ fn build_entries(
             return Err(BuildError::DuplicateEntry(entry_path));
         }
 
-        let reuse = match std::fs::symlink_metadata(&entry_path) {
-            Ok(metadata) => match collisions {
-                CollisionPolicy::RejectAll => return Err(BuildError::DuplicateEntry(entry_path)),
-                // Order matters: `Directory` must be checked before the
-                // symlink-kind arm (it is never a symlink kind, but it must
-                // not fall into the generic file arm below), and the
-                // symlink-kind arm must be checked before the generic file
-                // arm (a symlink kind over an existing regular file must
-                // stay a `DuplicateEntry`, not be treated as an overwrite).
-                CollisionPolicy::ReuseMatching => match &entry.kind {
-                    Kind::Directory if metadata.file_type().is_dir() => true,
-                    Kind::Directory => return Err(BuildError::DuplicateEntry(entry_path)),
-                    kind if kind.is_symlink() => {
-                        return Err(BuildError::DuplicateEntry(entry_path));
-                    }
-                    _ if metadata.file_type().is_file() => false,
-                    _ => return Err(BuildError::DuplicateEntry(entry_path)),
-                },
-            },
-            Err(_) => false,
-        };
+        let reuse = resolve_reuse(&entry_path, &entry.kind, &created_directories, collisions)?;
 
         plan.push((entry_path, reuse));
     }
@@ -973,6 +984,44 @@ fn build_entries(
     }
 
     Ok(())
+}
+
+/// Decides whether `entry_path` may be reused as-is instead of created, or
+/// returns the error `DuplicateEntry` when it can't.
+fn resolve_reuse(
+    entry_path: &Path,
+    kind: &Kind<'_>,
+    created_directories: &HashSet<PathBuf>,
+    collisions: CollisionPolicy,
+) -> Result<bool, BuildError> {
+    if created_directories.contains(entry_path) {
+        // A path some other entry needs as an implicit parent is only
+        // reusable by a `Kind::Directory`; nothing else can occupy it, and
+        // nothing is on disk yet at this point for `symlink_metadata` to
+        // catch that on its own.
+        return if matches!(kind, Kind::Directory) {
+            Ok(true)
+        } else {
+            Err(BuildError::DuplicateEntry(entry_path.to_path_buf()))
+        };
+    }
+
+    std::fs::symlink_metadata(entry_path).map_or(Ok(false), |metadata| match collisions {
+        CollisionPolicy::RejectAll => Err(BuildError::DuplicateEntry(entry_path.to_path_buf())),
+        // Order matters: `Directory` must be checked before the
+        // symlink-kind arm (it is never a symlink kind, but it must not
+        // fall into the generic file arm below), and the symlink-kind arm
+        // must be checked before the generic file arm (a symlink kind over
+        // an existing regular file must stay a `DuplicateEntry`, not be
+        // treated as an overwrite).
+        CollisionPolicy::ReuseMatching => match kind {
+            Kind::Directory if metadata.file_type().is_dir() => Ok(true),
+            Kind::Directory => Err(BuildError::DuplicateEntry(entry_path.to_path_buf())),
+            kind if kind.is_symlink() => Err(BuildError::DuplicateEntry(entry_path.to_path_buf())),
+            _ if metadata.file_type().is_file() => Ok(false),
+            _ => Err(BuildError::DuplicateEntry(entry_path.to_path_buf())),
+        },
+    })
 }
 
 fn create_entry(root: &Path, entry_path: &Path, kind: &Kind<'_>) -> Result<(), BuildError> {
@@ -2438,5 +2487,104 @@ mod tests {
         assert!(!base.join("first").exists());
 
         std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn test_add_directory_after_implicit_parent_creation_builds() {
+        let mut builder = TempDirectoryBuilder::default();
+        builder.add_empty_file("a/b/c");
+        let a = builder.add_directory("a");
+        let temp_dir = builder.build().unwrap();
+
+        assert!(temp_dir.path_of(&a).is_dir());
+        assert_eq!(temp_dir.path_of(&a), temp_dir.path().join("a"));
+    }
+
+    #[test]
+    fn test_add_directory_before_implicit_parent_creation_builds() {
+        let mut builder = TempDirectoryBuilder::default();
+        let a = builder.add_directory("a");
+        builder.add_empty_file("a/b/c");
+        let temp_dir = builder.build().unwrap();
+
+        assert!(temp_dir.path_of(&a).is_dir());
+        assert!(temp_dir.path().join("a/b/c").exists());
+    }
+
+    #[test]
+    fn test_add_directory_on_intermediate_implicit_parent_builds() {
+        let mut builder = TempDirectoryBuilder::default();
+        builder.add_empty_file("a/b/c");
+        let ab = builder.add_directory("a/b");
+        let temp_dir = builder.build().unwrap();
+
+        assert!(temp_dir.path_of(&ab).is_dir());
+    }
+
+    #[test]
+    fn test_add_directory_twice_is_duplicate_entry() {
+        let mut builder = TempDirectoryBuilder::default();
+        builder.add_directory("a");
+        builder.add_directory("a");
+        let error = builder.build().unwrap_err();
+
+        assert!(matches!(error, BuildError::DuplicateEntry(_)));
+    }
+
+    #[test]
+    fn test_add_empty_file_over_implicit_parent_directory_is_duplicate_entry() {
+        let mut builder = TempDirectoryBuilder::default();
+        builder.add_empty_file("a/b");
+        builder.add_empty_file("a");
+        let error = builder.build().unwrap_err();
+
+        assert!(matches!(error, BuildError::DuplicateEntry(_)));
+    }
+
+    #[test]
+    fn test_add_symlink_over_implicit_parent_directory_is_duplicate_entry() {
+        let mut builder = TempDirectoryBuilder::default();
+        builder.add_empty_file("a/b");
+        builder.add_symlink("a", "target");
+        let error = builder.build().unwrap_err();
+
+        assert!(matches!(error, BuildError::DuplicateEntry(_)));
+    }
+
+    #[test]
+    fn test_add_directory_over_existing_directory_on_fixed_root_is_duplicate_entry() {
+        let base = std::env::temp_dir().join(format!(
+            "test_add_directory_over_existing_directory_on_fixed_root_is_duplicate_entry_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(base.join("a")).unwrap();
+
+        let mut builder = TempDirectoryBuilder::default();
+        builder.root_folder(&base);
+        builder.add_directory("a");
+        let error = builder.build().unwrap_err();
+
+        assert!(matches!(error, BuildError::DuplicateEntry(_)));
+
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_set_mode_on_directory_declared_after_implicit_creation() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut builder = TempDirectoryBuilder::default();
+        builder.add_empty_file("a/b/c");
+        let a = builder.add_directory("a");
+        builder.set_mode(&a, 0o700);
+        let temp_dir = builder.build().unwrap();
+
+        let mode = std::fs::metadata(temp_dir.path_of(&a))
+            .unwrap()
+            .permissions()
+            .mode();
+
+        assert_eq!(mode & 0o777, 0o700);
     }
 }
