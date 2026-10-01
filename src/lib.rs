@@ -6,6 +6,7 @@ use std::{
     fs::File,
     io::Write,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use path_clean::PathClean;
@@ -90,12 +91,16 @@ impl AsRef<Path> for TempDirectory {
     }
 }
 
-/// Identifies an entry declared on a `TempDirectoryBuilder`.
+/// Identifies an entry declared on a `TempDirectoryBuilder` or a
+/// `TempDirectoryOverlay`.
 ///
 /// Returned by the `add_*` methods. There is no other way to build one, so a
-/// key always designates an entry that `build()` creates.
+/// key always designates an entry that `build()` or `build_into()` creates. A
+/// key is tied to the builder or overlay that returned it: passing it to
+/// another one panics rather than configuring an unrelated entry.
 #[derive(Debug, Clone)]
 pub struct EntryKey {
+    entries_id: u64,
     index: usize,
     path: Box<Path>,
 }
@@ -541,22 +546,34 @@ impl<'a> TempDirectoryBuilder<'a> {
     }
 }
 
+static NEXT_ENTRIES_ID: AtomicU64 = AtomicU64::new(0);
+
 /// Entries declared so far, shared by `TempDirectoryBuilder` and
 /// `TempDirectoryOverlay`.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct Entries<'a> {
+    /// Identity of this instance, copied into every key it hands out.
+    id: u64,
     /// List of file metadata entries in the tree.
     list: Vec<Entry<'a>>,
     /// Path prepended to every entry declared through `add`, set for the duration of an `in_directory` call.
     prefix: PathBuf,
 }
 
+impl Default for Entries<'_> {
+    fn default() -> Self {
+        Self {
+            id: NEXT_ENTRIES_ID.fetch_add(1, Ordering::Relaxed),
+            list: Vec::new(),
+            prefix: PathBuf::new(),
+        }
+    }
+}
+
 impl<'a> Entries<'a> {
     fn assert_owns(&self, key: &EntryKey) {
         assert!(
-            self.list
-                .get(key.index)
-                .is_some_and(|entry| entry.path.clean().as_path() == &*key.path),
+            key.entries_id == self.id,
             "EntryKey for '{}' does not belong to this builder",
             key.path.display()
         );
@@ -582,6 +599,7 @@ impl<'a> Entries<'a> {
         });
 
         EntryKey {
+            entries_id: self.id,
             index,
             path: key_path,
         }
@@ -2472,6 +2490,33 @@ mod tests {
         let temp_dir_path = temp_dir.path().to_path_buf();
         drop(temp_dir);
         assert!(!temp_dir_path.exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    #[should_panic(expected = "does not belong to this builder")]
+    fn test_overlay_rejects_a_builder_key_declaring_the_same_path() {
+        let mut builder = TempDirectoryBuilder::default();
+        let repository = builder.add_directory("repository");
+
+        let mut overlay = TempDirectoryOverlay::default();
+        overlay.add_directory("repository");
+
+        overlay.set_mode(&repository, 0o700);
+    }
+
+    #[test]
+    #[should_panic(expected = "does not belong to this builder")]
+    fn test_builder_rejects_an_overlay_key_declaring_the_same_path() {
+        let mut overlay = TempDirectoryOverlay::default();
+        let repository = overlay.add_directory("repository");
+
+        let mut builder = TempDirectoryBuilder::default();
+        builder.add_directory("repository");
+
+        builder.in_directory(&repository, |builder| {
+            builder.add_empty_file("a");
+        });
     }
 
     #[test]
