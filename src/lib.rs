@@ -997,8 +997,16 @@ fn build_entries(
         }
     }
 
-    for (entry, (entry_path, _)) in entries.iter().zip(&plan) {
-        apply_permissions(entry_path, entry)?;
+    // Deepest path first, so a directory stripped of its owner write or
+    // search bit is chmod'd only once every entry inside it has been. In
+    // declaration order, `set_mode(dir, 0o400)` written above its children
+    // would make their own `set_permissions` fail with `EACCES`, which would
+    // make the result depend on the order the entries were declared in.
+    let mut permission_order: Vec<usize> = (0..entries.len()).collect();
+    permission_order.sort_by_key(|&index| std::cmp::Reverse(plan[index].0.components().count()));
+
+    for index in permission_order {
+        apply_permissions(&plan[index].0, &entries[index])?;
     }
 
     Ok(())
@@ -1028,7 +1036,9 @@ fn resolve_reuse(
             CollisionPolicy::ReuseMatching => match kind {
                 Kind::Directory if metadata.file_type().is_dir() => Ok(true),
                 Kind::Directory => Err(BuildError::DuplicateEntry(entry_path.to_path_buf())),
-                kind if kind.is_symlink() => Err(BuildError::DuplicateEntry(entry_path.to_path_buf())),
+                kind if kind.is_symlink() => {
+                    Err(BuildError::DuplicateEntry(entry_path.to_path_buf()))
+                }
                 _ if metadata.file_type().is_file() => Ok(false),
                 _ => Err(BuildError::DuplicateEntry(entry_path.to_path_buf())),
             },
@@ -1846,6 +1856,62 @@ mod tests {
         drop(temp_dir);
 
         assert!(!root.exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_set_mode_on_a_directory_declared_before_its_children() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut builder = TempDirectoryBuilder::default();
+        let dir = builder.add_directory("dir");
+        builder.set_mode(&dir, 0o400);
+        let file = builder.add_text_file("dir/foo.txt", "bar");
+        builder.set_mode(&file, 0o600);
+        let temp_dir = builder.build().unwrap();
+
+        let dir_mode = std::fs::metadata(temp_dir.path_of(&dir))
+            .unwrap()
+            .permissions()
+            .mode();
+
+        assert_eq!(dir_mode & 0o777, 0o400);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_set_mode_on_a_directory_is_order_independent() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mode_of = |children_first: bool| {
+            let mut builder = TempDirectoryBuilder::default();
+            let (dir, file) = if children_first {
+                let file = builder.add_text_file("dir/foo.txt", "bar");
+                (builder.add_directory("dir"), file)
+            } else {
+                let dir = builder.add_directory("dir");
+                (dir, builder.add_text_file("dir/foo.txt", "bar"))
+            };
+            builder.set_mode(&dir, 0o500);
+            builder.set_mode(&file, 0o640);
+            let temp_dir = builder.build().unwrap();
+
+            (
+                std::fs::metadata(temp_dir.path_of(&dir))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                std::fs::metadata(temp_dir.path_of(&file))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+            )
+        };
+
+        assert_eq!(mode_of(false), (0o500, 0o640));
+        assert_eq!(mode_of(true), mode_of(false));
     }
 
     #[test]
