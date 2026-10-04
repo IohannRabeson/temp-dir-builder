@@ -92,12 +92,12 @@ impl AsRef<Path> for TempDirectory {
 }
 
 /// Identifies an entry declared on a `TempDirectoryBuilder` or a
-/// `TempDirectoryOverlay`.
+/// `TempDirectoryAdditions`.
 ///
 /// Returned by the `add_*` methods. There is no other way to build one, so a
 /// key always designates an entry that `build()` or `build_into()` creates. A
-/// key is tied to the builder or overlay that returned it: passing it to
-/// another one panics rather than configuring an unrelated entry.
+/// key is tied to whichever of the two returned it: passing it to another one
+/// panics rather than configuring an unrelated entry.
 #[derive(Debug, Clone)]
 pub struct EntryKey {
     entries_id: u64,
@@ -564,7 +564,7 @@ impl<'a> TempDirectoryBuilder<'a> {
 static NEXT_ENTRIES_ID: AtomicU64 = AtomicU64::new(0);
 
 /// Entries declared so far, shared by `TempDirectoryBuilder` and
-/// `TempDirectoryOverlay`.
+/// `TempDirectoryAdditions`.
 #[derive(Debug)]
 struct Entries<'a> {
     /// Identity of this instance, copied into every key it hands out.
@@ -691,32 +691,32 @@ impl<'a> Entries<'a> {
 /// Declares entries to create inside a directory that already exists.
 ///
 /// Unlike `TempDirectoryBuilder`, there is no root to configure and no
-/// temporary directory to delete on drop: `TempDirectoryOverlay` only ever
+/// temporary directory to delete on drop: `TempDirectoryAdditions` only ever
 /// writes into a `TempDirectory` someone else already built and owns. It has
 /// no `root_folder`, `random_root_in`, or `delete_on_drop` methods, so a
 /// builder meant for `build()` that was reused here by mistake fails to
 /// compile instead of having those calls silently ignored:
 ///
 /// ```compile_fail
-/// use temp_dir_builder::TempDirectoryOverlay;
-/// TempDirectoryOverlay::default().root_folder("/tmp/somewhere");
+/// use temp_dir_builder::TempDirectoryAdditions;
+/// TempDirectoryAdditions::default().root_folder("/tmp/somewhere");
 /// ```
 ///
 /// ```compile_fail
-/// use temp_dir_builder::TempDirectoryOverlay;
-/// TempDirectoryOverlay::default().random_root_in("/tmp/somewhere");
+/// use temp_dir_builder::TempDirectoryAdditions;
+/// TempDirectoryAdditions::default().random_root_in("/tmp/somewhere");
 /// ```
 ///
 /// ```compile_fail
-/// use temp_dir_builder::TempDirectoryOverlay;
-/// TempDirectoryOverlay::default().delete_on_drop(false);
+/// use temp_dir_builder::TempDirectoryAdditions;
+/// TempDirectoryAdditions::default().delete_on_drop(false);
 /// ```
 #[derive(Debug, Default)]
-pub struct TempDirectoryOverlay<'a> {
+pub struct TempDirectoryAdditions<'a> {
     entries: Entries<'a>,
 }
 
-impl<'a> TempDirectoryOverlay<'a> {
+impl<'a> TempDirectoryAdditions<'a> {
     /// Adds an empty file.
     /// * `path` - Path of the file to create. This path must be relative to `directory`. If the path is outside
     ///   it (e.g: "../foo") the error `BuildError::EntryOutsideDirectory` will be returned.
@@ -735,15 +735,14 @@ impl<'a> TempDirectoryOverlay<'a> {
         self.entries.add_directory(path)
     }
 
-    /// Declares entries relative to a directory already declared on this
-    /// overlay, so a nested tree names each directory once. The keys
-    /// returned inside the closure are ordinary keys holding the full path
-    /// from `directory`'s root, usable with `path_of`, `add_symlink_to` and
-    /// the `set_*` methods exactly like any other key. `in_directory` calls
-    /// can nest.
+    /// Declares entries relative to a directory already declared here, so a
+    /// nested tree names each directory once. The keys returned inside the
+    /// closure are ordinary keys holding the full path from `directory`'s
+    /// root, usable with `path_of`, `add_symlink_to` and the `set_*` methods
+    /// exactly like any other key. `in_directory` calls can nest.
     ///
     /// # Panics
-    /// Panics if `directory` was not returned by this overlay.
+    /// Panics if `directory` was not returned by these additions.
     pub fn in_directory<F, R>(&mut self, directory: &EntryKey, declare: F) -> R
     where
         F: FnOnce(&mut Self) -> R,
@@ -801,13 +800,12 @@ impl<'a> TempDirectoryOverlay<'a> {
     ///   target is written verbatim. The target does not have to exist, nor
     ///   be inside `directory`. Use `add_relative_symlink` to write the
     ///   target verbatim instead, or `add_symlink_to` when the target is an
-    ///   entry already declared on this overlay.
+    ///   entry already declared on these additions.
     pub fn add_symlink(&mut self, path: impl AsRef<Path>, target: impl AsRef<Path>) -> EntryKey {
         self.entries.add_symlink(path, target)
     }
 
-    /// Adds a symbolic link targeting an entry already declared on this
-    /// overlay.
+    /// Adds a symbolic link targeting an entry already declared here.
     ///
     /// Unlike `add_symlink`, `target` can only be an `EntryKey`, so a target
     /// that was renamed or removed is a compile error at the call site, not a
@@ -818,7 +816,7 @@ impl<'a> TempDirectoryOverlay<'a> {
     /// * `target` - Key of the entry to link to, as returned by an `add_*` method.
     ///
     /// # Panics
-    /// Panics if `target` was not returned by this overlay.
+    /// Panics if `target` was not returned by these additions.
     pub fn add_symlink_to(&mut self, path: impl AsRef<Path>, target: &EntryKey) -> EntryKey {
         self.entries.add_symlink_to(path, target)
     }
@@ -876,7 +874,7 @@ impl<'a> TempDirectoryOverlay<'a> {
     /// Sets whether an entry is read-only.
     ///
     /// # Panics
-    /// Panics if `key` was not returned by this overlay.
+    /// Panics if `key` was not returned by these additions.
     pub fn set_readonly(&mut self, key: &EntryKey, readonly: bool) {
         self.entries.set_readonly(key, readonly);
     }
@@ -885,7 +883,7 @@ impl<'a> TempDirectoryOverlay<'a> {
     /// execute bit; on other platforms it does nothing.
     ///
     /// # Panics
-    /// Panics if `key` was not returned by this overlay.
+    /// Panics if `key` was not returned by these additions.
     pub fn set_executable(&mut self, key: &EntryKey, executable: bool) {
         self.entries.set_executable(key, executable);
     }
@@ -893,7 +891,7 @@ impl<'a> TempDirectoryOverlay<'a> {
     /// Sets the Unix permission bits of an entry, e.g. `0o744`.
     ///
     /// # Panics
-    /// Panics if `key` was not returned by this overlay.
+    /// Panics if `key` was not returned by these additions.
     #[cfg(unix)]
     pub fn set_mode(&mut self, key: &EntryKey, mode: u32) {
         self.entries.set_mode(key, mode);
@@ -922,14 +920,14 @@ impl<'a> TempDirectoryOverlay<'a> {
     /// # Examples
     ///
     /// ```rust
-    /// use temp_dir_builder::{TempDirectoryBuilder, TempDirectoryOverlay};
+    /// use temp_dir_builder::{TempDirectoryBuilder, TempDirectoryAdditions};
     /// let mut builder = TempDirectoryBuilder::default();
     /// let repository = builder.add_directory("repository");
     /// let temp_dir = builder.build().expect("create temp dir");
     ///
-    /// let mut overlay = TempDirectoryOverlay::default();
-    /// let gitignore = overlay.add_text_file("repository/.gitignore", "*.log\n");
-    /// overlay.build_into(&temp_dir).expect("extend temp dir");
+    /// let mut additions = TempDirectoryAdditions::default();
+    /// let gitignore = additions.add_text_file("repository/.gitignore", "*.log\n");
+    /// additions.build_into(&temp_dir).expect("extend temp dir");
     /// assert!(temp_dir.path_of(&gitignore).is_file());
     /// ```
     pub fn build_into(&self, directory: &TempDirectory) -> Result<(), BuildError> {
@@ -2397,9 +2395,9 @@ mod tests {
         let repository = builder.add_directory("repository");
         let temp_dir = builder.build().unwrap();
 
-        let mut overlay = TempDirectoryOverlay::default();
-        let gitignore = overlay.add_text_file("repository/.gitignore", "*.log\n");
-        overlay.build_into(&temp_dir).unwrap();
+        let mut additions = TempDirectoryAdditions::default();
+        let gitignore = additions.add_text_file("repository/.gitignore", "*.log\n");
+        additions.build_into(&temp_dir).unwrap();
 
         assert_eq!(
             std::fs::read_to_string(temp_dir.path_of(&gitignore)).unwrap(),
@@ -2414,9 +2412,9 @@ mod tests {
         builder.add_text_file("foo.txt", "old");
         let temp_dir = builder.build().unwrap();
 
-        let mut overlay = TempDirectoryOverlay::default();
-        overlay.add_text_file("foo.txt", "new");
-        overlay.build_into(&temp_dir).unwrap();
+        let mut additions = TempDirectoryAdditions::default();
+        additions.add_text_file("foo.txt", "new");
+        additions.build_into(&temp_dir).unwrap();
 
         assert_eq!(
             std::fs::read_to_string(temp_dir.path().join("foo.txt")).unwrap(),
@@ -2431,9 +2429,9 @@ mod tests {
         builder.add_empty_file("dir/existing.txt");
         let temp_dir = builder.build().unwrap();
 
-        let mut overlay = TempDirectoryOverlay::default();
-        let dir = overlay.add_directory("dir");
-        overlay.build_into(&temp_dir).unwrap();
+        let mut additions = TempDirectoryAdditions::default();
+        let dir = additions.add_directory("dir");
+        additions.build_into(&temp_dir).unwrap();
 
         assert!(temp_dir.path_of(&dir).is_dir());
         assert!(temp_dir.path().join("dir/existing.txt").exists());
@@ -2445,9 +2443,9 @@ mod tests {
         builder.add_empty_file("thing");
         let temp_dir = builder.build().unwrap();
 
-        let mut overlay = TempDirectoryOverlay::default();
-        overlay.add_directory("thing");
-        let error = overlay.build_into(&temp_dir).unwrap_err();
+        let mut additions = TempDirectoryAdditions::default();
+        additions.add_directory("thing");
+        let error = additions.build_into(&temp_dir).unwrap_err();
 
         assert!(matches!(error, BuildError::DuplicateEntry(_)));
     }
@@ -2459,9 +2457,9 @@ mod tests {
         builder.add_empty_file("thing/inside.txt");
         let temp_dir = builder.build().unwrap();
 
-        let mut overlay = TempDirectoryOverlay::default();
-        overlay.add_text_file("thing", "content");
-        let error = overlay.build_into(&temp_dir).unwrap_err();
+        let mut additions = TempDirectoryAdditions::default();
+        additions.add_text_file("thing", "content");
+        let error = additions.build_into(&temp_dir).unwrap_err();
 
         assert!(matches!(error, BuildError::DuplicateEntry(_)));
         assert!(temp_dir.path().join("thing").is_dir());
@@ -2474,9 +2472,9 @@ mod tests {
         builder.add_empty_file("link");
         let temp_dir = builder.build().unwrap();
 
-        let mut overlay = TempDirectoryOverlay::default();
-        overlay.add_symlink("link", "target");
-        let error = overlay.build_into(&temp_dir).unwrap_err();
+        let mut additions = TempDirectoryAdditions::default();
+        additions.add_symlink("link", "target");
+        let error = additions.build_into(&temp_dir).unwrap_err();
 
         assert!(matches!(error, BuildError::DuplicateEntry(_)));
     }
@@ -2487,9 +2485,9 @@ mod tests {
         builder.add_directory("link");
         let temp_dir = builder.build().unwrap();
 
-        let mut overlay = TempDirectoryOverlay::default();
-        overlay.add_symlink("link", "target");
-        let error = overlay.build_into(&temp_dir).unwrap_err();
+        let mut additions = TempDirectoryAdditions::default();
+        additions.add_symlink("link", "target");
+        let error = additions.build_into(&temp_dir).unwrap_err();
 
         assert!(matches!(error, BuildError::DuplicateEntry(_)));
     }
@@ -2500,9 +2498,9 @@ mod tests {
         builder.add_symlink("link", "first-target");
         let temp_dir = builder.build().unwrap();
 
-        let mut overlay = TempDirectoryOverlay::default();
-        overlay.add_symlink("link", "second-target");
-        let error = overlay.build_into(&temp_dir).unwrap_err();
+        let mut additions = TempDirectoryAdditions::default();
+        additions.add_symlink("link", "second-target");
+        let error = additions.build_into(&temp_dir).unwrap_err();
 
         assert!(matches!(error, BuildError::DuplicateEntry(_)));
     }
@@ -2513,9 +2511,9 @@ mod tests {
         builder.add_symlink("thing", "missing");
         let temp_dir = builder.build().unwrap();
 
-        let mut overlay = TempDirectoryOverlay::default();
-        overlay.add_text_file("thing", "content");
-        let error = overlay.build_into(&temp_dir).unwrap_err();
+        let mut additions = TempDirectoryAdditions::default();
+        additions.add_text_file("thing", "content");
+        let error = additions.build_into(&temp_dir).unwrap_err();
 
         assert!(matches!(error, BuildError::DuplicateEntry(_)));
     }
@@ -2527,10 +2525,10 @@ mod tests {
         builder.add_directory("second");
         let temp_dir = builder.build().unwrap();
 
-        let mut overlay = TempDirectoryOverlay::default();
-        overlay.add_text_file("first.txt", "overwritten");
-        overlay.add_text_file("second", "not a directory");
-        let error = overlay.build_into(&temp_dir).unwrap_err();
+        let mut additions = TempDirectoryAdditions::default();
+        additions.add_text_file("first.txt", "overwritten");
+        additions.add_text_file("second", "not a directory");
+        let error = additions.build_into(&temp_dir).unwrap_err();
 
         assert!(matches!(error, BuildError::DuplicateEntry(_)));
         assert_eq!(
@@ -2543,9 +2541,9 @@ mod tests {
     fn test_build_into_entry_outside_directory() {
         let temp_dir = TempDirectoryBuilder::default().build().unwrap();
 
-        let mut overlay = TempDirectoryOverlay::default();
-        overlay.add_empty_file("../foo");
-        let error = overlay.build_into(&temp_dir).unwrap_err();
+        let mut additions = TempDirectoryAdditions::default();
+        additions.add_empty_file("../foo");
+        let error = additions.build_into(&temp_dir).unwrap_err();
 
         assert!(matches!(error, BuildError::EntryOutsideDirectory(_)));
     }
@@ -2557,10 +2555,10 @@ mod tests {
 
         let temp_dir = TempDirectoryBuilder::default().build().unwrap();
 
-        let mut overlay = TempDirectoryOverlay::default();
-        let script = overlay.add_text_file("run.sh", "#!/bin/sh");
-        overlay.set_mode(&script, 0o755);
-        overlay.build_into(&temp_dir).unwrap();
+        let mut additions = TempDirectoryAdditions::default();
+        let script = additions.add_text_file("run.sh", "#!/bin/sh");
+        additions.set_mode(&script, 0o755);
+        additions.build_into(&temp_dir).unwrap();
 
         let mode = std::fs::metadata(temp_dir.path_of(&script))
             .unwrap()
@@ -2576,21 +2574,21 @@ mod tests {
     #[test]
     #[cfg(unix)]
     #[should_panic(expected = "does not belong to this builder")]
-    fn test_overlay_rejects_a_builder_key_declaring_the_same_path() {
+    fn test_additions_reject_a_builder_key_declaring_the_same_path() {
         let mut builder = TempDirectoryBuilder::default();
         let repository = builder.add_directory("repository");
 
-        let mut overlay = TempDirectoryOverlay::default();
-        overlay.add_directory("repository");
+        let mut additions = TempDirectoryAdditions::default();
+        additions.add_directory("repository");
 
-        overlay.set_mode(&repository, 0o700);
+        additions.set_mode(&repository, 0o700);
     }
 
     #[test]
     #[should_panic(expected = "does not belong to this builder")]
-    fn test_builder_rejects_an_overlay_key_declaring_the_same_path() {
-        let mut overlay = TempDirectoryOverlay::default();
-        let repository = overlay.add_directory("repository");
+    fn test_builder_rejects_an_additions_key_declaring_the_same_path() {
+        let mut additions = TempDirectoryAdditions::default();
+        let repository = additions.add_directory("repository");
 
         let mut builder = TempDirectoryBuilder::default();
         builder.add_directory("repository");
