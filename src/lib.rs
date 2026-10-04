@@ -525,7 +525,11 @@ impl<'a> TempDirectoryBuilder<'a> {
     /// operating system.
     ///
     /// # Errors
-    /// A `BuildError` is returned in case of error.
+    /// A `BuildError` is returned in case of error. The root is deleted again
+    /// before returning, whether it was generated or named with
+    /// `root_folder`, so a failed build leaves nothing behind. Call
+    /// `delete_on_drop(false)` to keep it instead, which also keeps the
+    /// partial tree a failure left in it.
     pub fn build(&self) -> Result<TempDirectory, BuildError> {
         let root = match &self.root {
             Root::Fixed(root) => {
@@ -537,7 +541,18 @@ impl<'a> TempDirectoryBuilder<'a> {
             Root::RandomIn(base) => create_random_temp_directory(base)?,
         };
 
-        build_entries(&root, &self.entries.list, CollisionPolicy::RejectAll)?;
+        if let Err(err) = build_entries(&root, &self.entries.list, CollisionPolicy::RejectAll) {
+            if self.delete_on_drop {
+                // The same pair `Drop` uses, so an entry this build locked
+                // with `set_readonly` or `set_mode` does not keep its own
+                // tree alive. Best-effort, like `Drop`: a cleanup that fails
+                // must not replace the error that caused it.
+                make_deletable(&root);
+                let _ = std::fs::remove_dir_all(&root);
+            }
+
+            return Err(err);
+        }
 
         Ok(TempDirectory {
             path: root,
@@ -2345,7 +2360,7 @@ mod tests {
         builder.add_symlink("link", "other-missing");
         let error = builder.build().unwrap_err();
 
-        std::fs::remove_dir_all(&root).unwrap();
+        let _ = std::fs::remove_dir_all(&root);
 
         assert!(matches!(error, BuildError::DuplicateEntry(_)));
     }
@@ -2585,6 +2600,109 @@ mod tests {
         });
     }
 
+    fn failing_build_base(name: &str) -> PathBuf {
+        let base = std::env::temp_dir().join(format!("{name}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        base
+    }
+
+    #[test]
+    fn test_failed_build_deletes_the_root_it_generated() {
+        let base = failing_build_base("test_failed_build_deletes_the_root_it_generated");
+
+        let mut builder = TempDirectoryBuilder::default();
+        builder.random_root_in(&base);
+        builder.add_empty_file("a");
+        builder.add_empty_file("a");
+
+        assert!(matches!(
+            builder.build().unwrap_err(),
+            BuildError::DuplicateEntry(_)
+        ));
+        assert_eq!(std::fs::read_dir(&base).unwrap().count(), 0);
+
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn test_failed_build_deletes_a_partially_created_tree() {
+        let base = failing_build_base("test_failed_build_deletes_a_partially_created_tree");
+
+        let mut builder = TempDirectoryBuilder::default();
+        builder.random_root_in(&base);
+        builder.add_text_file("kept/a.txt", "already written");
+        builder.add_file("copied", "does-not-exist");
+
+        assert!(matches!(
+            builder.build().unwrap_err(),
+            BuildError::FailedToCopyFile(_, _)
+        ));
+        assert_eq!(std::fs::read_dir(&base).unwrap().count(), 0);
+
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_failed_build_deletes_a_tree_it_locked_itself() {
+        let base = failing_build_base("test_failed_build_deletes_a_tree_it_locked_itself");
+
+        let mut builder = TempDirectoryBuilder::default();
+        builder.random_root_in(&base);
+        let locked = builder.add_directory("locked");
+        builder.add_empty_file("locked/inside");
+        builder.set_mode(&locked, 0o400);
+        let dangling = builder.add_symlink("dangling", "nowhere");
+        builder.set_readonly(&dangling, true);
+
+        assert!(matches!(
+            builder.build().unwrap_err(),
+            BuildError::PermissionsOnSymlink(_)
+        ));
+        assert_eq!(std::fs::read_dir(&base).unwrap().count(), 0);
+
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn test_failed_build_deletes_a_root_folder_too() {
+        let base = failing_build_base("test_failed_build_deletes_a_root_folder_too");
+
+        let mut builder = TempDirectoryBuilder::default();
+        builder.root_folder(&base);
+        builder.add_text_file("kept/a.txt", "already written");
+        builder.add_file("copied", "does-not-exist");
+
+        assert!(matches!(
+            builder.build().unwrap_err(),
+            BuildError::FailedToCopyFile(_, _)
+        ));
+        assert!(!base.exists());
+    }
+
+    #[test]
+    fn test_failed_build_keeps_the_root_when_delete_on_drop_is_false() {
+        let base =
+            failing_build_base("test_failed_build_keeps_the_root_when_delete_on_drop_is_false");
+
+        let mut builder = TempDirectoryBuilder::default();
+        builder.root_folder(&base);
+        builder.delete_on_drop(false);
+        builder.add_text_file("kept/a.txt", "already written");
+        builder.add_file("copied", "does-not-exist");
+
+        assert!(matches!(
+            builder.build().unwrap_err(),
+            BuildError::FailedToCopyFile(_, _)
+        ));
+        assert_eq!(
+            std::fs::read_to_string(base.join("kept/a.txt")).unwrap(),
+            "already written"
+        );
+
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
     #[test]
     fn test_build_validates_before_creating_any_entry() {
         let base = std::env::temp_dir().join(format!(
@@ -2603,7 +2721,7 @@ mod tests {
         assert!(matches!(error, BuildError::DuplicateEntry(_)));
         assert!(!base.join("first").exists());
 
-        std::fs::remove_dir_all(&base).unwrap();
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -2683,7 +2801,7 @@ mod tests {
 
         assert!(matches!(error, BuildError::DuplicateEntry(_)));
 
-        std::fs::remove_dir_all(&base).unwrap();
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -2704,7 +2822,7 @@ mod tests {
 
         assert!(matches!(error, BuildError::DuplicateEntry(_)));
 
-        std::fs::remove_dir_all(&base).unwrap();
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -2727,7 +2845,7 @@ mod tests {
         assert!(matches!(error, BuildError::DuplicateEntry(_)));
         assert!(!base.join("unrelated.txt").exists());
 
-        std::fs::remove_dir_all(&base).unwrap();
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
