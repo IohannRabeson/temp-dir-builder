@@ -920,15 +920,17 @@ impl<'a> TempDirectoryAdditions<'a> {
     /// # Examples
     ///
     /// ```rust
+    // <snip id="example-build-into">
     /// use temp_dir_builder::{TempDirectoryBuilder, TempDirectoryAdditions};
     /// let mut builder = TempDirectoryBuilder::default();
     /// let repository = builder.add_directory("repository");
     /// let temp_dir = builder.build().expect("create temp dir");
-    ///
+    /// // git init, or anything else that needs the directory to exist
     /// let mut additions = TempDirectoryAdditions::default();
-    /// let gitignore = additions.add_text_file("repository/.gitignore", "*.log\n");
+    /// let gitignore = additions.add_text_file("repository/.gitignore", "*.log");
     /// additions.build_into(&temp_dir).expect("extend temp dir");
     /// assert!(temp_dir.path_of(&gitignore).is_file());
+    // </snip>
     /// ```
     pub fn build_into(&self, directory: &TempDirectory) -> Result<(), BuildError> {
         build_entries(
