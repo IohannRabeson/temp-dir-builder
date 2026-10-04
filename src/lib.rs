@@ -2574,6 +2574,173 @@ mod tests {
     }
 
     #[test]
+    fn test_build_into_directory_over_existing_symlink_is_duplicate_entry() {
+        let mut builder = TempDirectoryBuilder::default();
+        builder.add_directory("target");
+        builder.add_symlink("link", "target");
+        let temp_dir = builder.build().unwrap();
+
+        let mut additions = TempDirectoryAdditions::default();
+        additions.add_directory("link");
+        let error = additions.build_into(&temp_dir).unwrap_err();
+
+        assert!(matches!(error, BuildError::DuplicateEntry(_)));
+        assert!(temp_dir.join("link").is_dir(), "the symlink still resolves");
+        assert!(
+            std::fs::symlink_metadata(temp_dir.join("link"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+
+    #[test]
+    fn test_build_into_in_directory_lands_under_the_directory() {
+        let temp_dir = TempDirectoryBuilder::default().build().unwrap();
+
+        let mut additions = TempDirectoryAdditions::default();
+        let main = additions.add_directory("main");
+        let log = additions.in_directory(&main, |additions| {
+            additions.add_empty_file("a.log");
+            additions.add_text_file("b.log", "content")
+        });
+        additions.build_into(&temp_dir).unwrap();
+
+        assert_eq!(temp_dir.path_of(&log), temp_dir.join("main/b.log"));
+        assert!(temp_dir.join("main/a.log").is_file());
+        assert_eq!(
+            std::fs::read_to_string(temp_dir.path_of(&log)).unwrap(),
+            "content"
+        );
+    }
+
+    #[test]
+    fn test_build_into_in_directory_reuses_a_directory_already_on_disk() {
+        let mut builder = TempDirectoryBuilder::default();
+        builder.add_directory("main");
+        builder.add_empty_file("main/predating");
+        let temp_dir = builder.build().unwrap();
+
+        let mut additions = TempDirectoryAdditions::default();
+        let main = additions.add_directory("main");
+        let log = additions.in_directory(&main, |additions| additions.add_empty_file("a.log"));
+        additions.build_into(&temp_dir).unwrap();
+
+        assert_eq!(temp_dir.path_of(&log), temp_dir.join("main/a.log"));
+        assert!(temp_dir.join("main/predating").is_file());
+    }
+
+    #[test]
+    fn test_build_into_add_text_file_with_receives_the_target_root() {
+        let temp_dir = TempDirectoryBuilder::default().build().unwrap();
+
+        let mut additions = TempDirectoryAdditions::default();
+        let config = additions.add_text_file_with("config.toml", |root| {
+            format!("data_dir = {:?}", root.join("data"))
+        });
+        additions.build_into(&temp_dir).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(temp_dir.path_of(&config)).unwrap(),
+            format!("data_dir = {:?}", temp_dir.join("data"))
+        );
+    }
+
+    #[test]
+    fn test_build_into_add_symlink_to_and_add_relative_symlink() {
+        let temp_dir = TempDirectoryBuilder::default().build().unwrap();
+
+        let mut additions = TempDirectoryAdditions::default();
+        let data = additions.add_text_file("data/file.txt", "content");
+        let absolute = additions.add_symlink_to("link_to_file", &data);
+        let relative = additions.add_relative_symlink("data/sibling", "file.txt");
+        additions.build_into(&temp_dir).unwrap();
+
+        assert_eq!(
+            std::fs::read_link(temp_dir.path_of(&absolute)).unwrap(),
+            temp_dir.join("data/file.txt")
+        );
+        assert_eq!(
+            std::fs::read_link(temp_dir.path_of(&relative)).unwrap(),
+            Path::new("file.txt")
+        );
+        assert_eq!(
+            std::fs::read_to_string(temp_dir.path_of(&relative)).unwrap(),
+            "content"
+        );
+    }
+
+    #[test]
+    fn test_build_into_set_readonly() {
+        let temp_dir = TempDirectoryBuilder::default().build().unwrap();
+
+        let mut additions = TempDirectoryAdditions::default();
+        let locked = additions.add_text_file("locked.txt", "content");
+        additions.set_readonly(&locked, true);
+        additions.build_into(&temp_dir).unwrap();
+
+        assert!(
+            std::fs::metadata(temp_dir.path_of(&locked))
+                .unwrap()
+                .permissions()
+                .readonly()
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_build_into_set_executable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = TempDirectoryBuilder::default().build().unwrap();
+
+        let mut additions = TempDirectoryAdditions::default();
+        let script = additions.add_text_file("run.sh", "#!/bin/sh");
+        additions.set_executable(&script, true);
+        additions.build_into(&temp_dir).unwrap();
+
+        let mode = std::fs::metadata(temp_dir.path_of(&script))
+            .unwrap()
+            .permissions()
+            .mode();
+
+        assert_eq!(mode & 0o100, 0o100);
+    }
+
+    #[test]
+    fn test_build_into_twice_is_idempotent_for_files_and_directories() {
+        let temp_dir = TempDirectoryBuilder::default().build().unwrap();
+
+        let mut additions = TempDirectoryAdditions::default();
+        additions.add_directory("dir");
+        let file = additions.add_text_file("dir/file.txt", "content");
+
+        additions.build_into(&temp_dir).unwrap();
+        additions
+            .build_into(&temp_dir)
+            .expect("a second pass finds its own directory and file and agrees with both");
+
+        assert_eq!(
+            std::fs::read_to_string(temp_dir.path_of(&file)).unwrap(),
+            "content"
+        );
+    }
+
+    #[test]
+    fn test_build_into_twice_is_a_duplicate_entry_for_a_symlink() {
+        let temp_dir = TempDirectoryBuilder::default().build().unwrap();
+
+        let mut additions = TempDirectoryAdditions::default();
+        let file = additions.add_empty_file("file.txt");
+        additions.add_symlink_to("link", &file);
+
+        additions.build_into(&temp_dir).unwrap();
+        let error = additions.build_into(&temp_dir).unwrap_err();
+
+        assert!(matches!(error, BuildError::DuplicateEntry(_)));
+    }
+
+    #[test]
     #[cfg(unix)]
     #[should_panic(expected = "does not belong to this builder")]
     fn test_additions_reject_a_builder_key_declaring_the_same_path() {
