@@ -320,7 +320,8 @@ impl<'a> TempDirectoryBuilder<'a> {
     /// nest.
     ///
     /// # Panics
-    /// Panics if `directory` was not returned by this builder.
+    /// Panics if `directory` was not returned by this builder, or if it does
+    /// not designate an entry declared with `add_directory`.
     ///
     /// # Examples
     ///
@@ -341,7 +342,7 @@ impl<'a> TempDirectoryBuilder<'a> {
     where
         F: FnOnce(&mut Self) -> R,
     {
-        self.entries.assert_owns(directory);
+        self.entries.assert_owns_directory(directory);
 
         let previous = std::mem::replace(&mut self.entries.prefix, directory.path.to_path_buf());
         let result = declare(self);
@@ -594,6 +595,15 @@ impl<'a> Entries<'a> {
         );
     }
 
+    fn assert_owns_directory(&self, key: &EntryKey) {
+        self.assert_owns(key);
+        assert!(
+            matches!(self.list[key.index].kind, Kind::Directory),
+            "EntryKey for '{}' is not a directory, so no entry can be declared inside it",
+            key.path.display()
+        );
+    }
+
     fn entry_mut(&mut self, key: &EntryKey) -> &mut Entry<'a> {
         self.assert_owns(key);
         &mut self.list[key.index]
@@ -742,12 +752,13 @@ impl<'a> TempDirectoryAdditions<'a> {
     /// exactly like any other key. `in_directory` calls can nest.
     ///
     /// # Panics
-    /// Panics if `directory` was not returned by these additions.
+    /// Panics if `directory` was not returned by these additions, or if it
+    /// does not designate an entry declared with `add_directory`.
     pub fn in_directory<F, R>(&mut self, directory: &EntryKey, declare: F) -> R
     where
         F: FnOnce(&mut Self) -> R,
     {
-        self.entries.assert_owns(directory);
+        self.entries.assert_owns_directory(directory);
 
         let previous = std::mem::replace(&mut self.entries.prefix, directory.path.to_path_buf());
         let result = declare(self);
@@ -2205,6 +2216,39 @@ mod tests {
         let mut builder = TempDirectoryBuilder::default();
         builder.in_directory(&foreign, |builder| {
             builder.add_empty_file("never");
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "is not a directory")]
+    fn test_in_directory_with_a_file_key_panics() {
+        let mut builder = TempDirectoryBuilder::default();
+        let file = builder.add_text_file("f", "content");
+
+        builder.in_directory(&file, |builder| {
+            builder.add_empty_file("never");
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "is not a directory")]
+    fn test_in_directory_with_a_symlink_key_panics() {
+        let mut builder = TempDirectoryBuilder::default();
+        let link = builder.add_symlink("link", "elsewhere");
+
+        builder.in_directory(&link, |builder| {
+            builder.add_empty_file("never");
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "is not a directory")]
+    fn test_build_into_in_directory_with_a_file_key_panics() {
+        let mut additions = TempDirectoryAdditions::default();
+        let file = additions.add_text_file("f", "content");
+
+        additions.in_directory(&file, |additions| {
+            additions.add_empty_file("never");
         });
     }
 
