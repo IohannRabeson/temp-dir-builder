@@ -159,6 +159,43 @@ let temp_dir = builder.build().expect("create temp dir");
 ```
 <!-- </snip> -->
 
+## Adding to a tree that already exists
+
+`TempDirectoryAdditions` declares more entries in a tree that has already been
+built, for the case where something has to happen between two parts of the
+tree: a directory must exist before `git init` runs, and the commit must exist
+before the part of the tree the test measures is created.
+
+<!-- <snip id="example-build-into" inject_from="code" strip_prefix="    /// " template="rust"> -->
+```rust
+use temp_dir_builder::{TempDirectoryBuilder, TempDirectoryAdditions};
+let mut builder = TempDirectoryBuilder::default();
+let repository = builder.add_directory("repository");
+let temp_dir = builder.build().expect("create temp dir");
+// git init, or anything else that needs the directory to exist
+let mut additions = TempDirectoryAdditions::default();
+let gitignore = additions.add_text_file("repository/.gitignore", "*.log");
+additions.build_into(&temp_dir).expect("extend temp dir");
+assert!(temp_dir.path_of(&gitignore).is_file());
+```
+<!-- </snip> -->
+
+A collision with something already on disk succeeds only when the declared
+entry and the existing one agree on kind: a declared file replaces an existing
+file's content, and a declared directory reuses an existing directory. Any
+other collision, including a kind mismatch or an existing symlink, fails with
+`DuplicateEntry`, so a typo that changes what shape of entry is expected at a
+path is still caught; a typo that lands on a same-shaped pre-existing entry is
+not, and is overwritten. Anything present and not declared is left untouched.
+
+Every entry is checked against that rule before anything is created, so a
+`DuplicateEntry` from one entry never leaves an earlier entry's target
+mutated.
+
+`TempDirectoryAdditions` has no `root_folder`, `random_root_in`, or
+`delete_on_drop`: it always writes into the `TempDirectory` passed to
+`build_into`, which stays responsible for deleting the tree.
+
 ## Migrating from 0.3.0
 
 `add_*` methods used to consume and return `self`/`EntryBuilder`, so trees were built as one chained expression. As of 0.4.0 they take `&mut self` and return an `EntryKey` instead, so that key can later resolve the entry's path or configure its permissions without re-typing its declared path. 0.3.0-style chains (`TempDirectoryBuilder::default().add_text_file(..).build()`) no longer compile; declare the builder with `let mut builder = ...` and call each method as its own statement, as shown above.
