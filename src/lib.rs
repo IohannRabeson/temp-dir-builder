@@ -195,6 +195,16 @@ impl Drop for TempDirectory {
 impl<'a> TempDirectoryBuilder<'a> {
     /// Sets the root folder where the tree will be created.\
     /// By default this is the temporary directory path returned by `std::env::temp_dir()`.
+    ///
+    /// `dir` becomes the root itself, not a parent to generate a directory
+    /// in, and the builder takes it over: a declared entry whose path already
+    /// exists in it is `BuildError::DuplicateEntry`, anything else already in
+    /// it is left alone while the tree is built, and `dir` is then deleted
+    /// whole, that content included, when the `TempDirectory` is dropped or
+    /// when `build()` fails. Pass a directory that exists only for this
+    /// purpose, and `delete_on_drop(false)` if it must survive. Use
+    /// `random_root_in` to generate a directory under `dir` instead of using
+    /// `dir`.
     pub fn root_folder(&mut self, dir: impl AsRef<Path>) {
         self.root = Root::Fixed(dir.as_ref().to_path_buf());
     }
