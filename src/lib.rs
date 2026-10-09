@@ -1026,7 +1026,7 @@ fn build_entries(
 
     for entry_path in &entry_paths {
         for ancestor in entry_path.ancestors().skip(1) {
-            if ancestor == root {
+            if ancestor == root || !ancestor.starts_with(root) {
                 break;
             }
             created_directories.insert(ancestor.to_path_buf());
@@ -1809,6 +1809,31 @@ mod tests {
         let error = builder.build().unwrap_err();
 
         assert!(matches!(error, BuildError::EmptyEntryName(0)));
+    }
+
+    #[test]
+    fn test_an_entry_path_that_cleans_to_the_root_is_a_duplicate_entry() {
+        for path in [".", "a/..", "./."] {
+            let mut builder = TempDirectoryBuilder::default();
+            builder.add_directory(path);
+            let error = builder.build().unwrap_err();
+
+            assert!(
+                matches!(error, BuildError::DuplicateEntry(_)),
+                "'{path}' resolves to the root, which already exists, but gave {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_a_parent_component_inside_the_root_is_cleaned_away() {
+        let mut builder = TempDirectoryBuilder::default();
+        let file = builder.add_empty_file("a/../b");
+        let temp_dir = builder.build().unwrap();
+
+        assert_eq!(temp_dir.path_of(&file), temp_dir.join("b"));
+        assert!(temp_dir.join("b").is_file());
+        assert!(!temp_dir.join("a").exists());
     }
 
     #[test]
