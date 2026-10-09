@@ -159,6 +159,37 @@ let temp_dir = builder.build().expect("create temp dir");
 ```
 <!-- </snip> -->
 
+## Where the tree is created
+
+By default the tree goes in a directory with a random name under
+`std::env::temp_dir()`, created by `build()` and deleted when the
+`TempDirectory` is dropped.
+
+`random_root_in` keeps the random name but picks the directory it goes under.
+That matters when `std::env::temp_dir()` is unsuitable for what is being
+tested: on macOS it is excluded from Time Machine backups, so a test checking
+backup exclusion would pass no matter what the code under test does.
+
+<!-- <snip id="example-random-root-in" inject_from="code" strip_prefix="    /// " template="rust"> -->
+```rust
+use temp_dir_builder::TempDirectoryBuilder;
+let mut builder = TempDirectoryBuilder::default();
+builder.random_root_in(std::env::current_dir().unwrap());
+let temp_dir = builder.build().expect("create temp dir");
+assert!(temp_dir.path().starts_with(std::env::current_dir().unwrap()));
+```
+<!-- </snip> -->
+
+`root_folder` names the root outright, for a test that has to know the path
+before the tree exists, for example to pass a relative path to the code under
+test. The directory given *is* the root rather than a parent to generate a
+name in, and the builder takes it over: it is deleted whole, including
+anything that was already in it, when the `TempDirectory` is dropped or when
+`build()` fails. Pass a directory that exists only for this purpose.
+
+`delete_on_drop(false)` keeps the tree instead, and also keeps whatever a
+failed `build()` left behind.
+
 ## Adding to a tree that already exists
 
 `TempDirectoryAdditions` declares more entries in a tree that has already been
