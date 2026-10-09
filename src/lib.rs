@@ -219,11 +219,13 @@ impl<'a> TempDirectoryBuilder<'a> {
     /// # Examples
     ///
     /// ```rust
+    // <snip id="example-random-root-in">
     /// use temp_dir_builder::TempDirectoryBuilder;
     /// let mut builder = TempDirectoryBuilder::default();
     /// builder.random_root_in(std::env::current_dir().unwrap());
     /// let temp_dir = builder.build().expect("create temp dir");
     /// assert!(temp_dir.path().starts_with(std::env::current_dir().unwrap()));
+    // </snip>
     /// ```
     pub fn random_root_in(&mut self, base: impl AsRef<Path>) {
         self.root = Root::RandomIn(base.as_ref().to_path_buf());
