@@ -330,8 +330,19 @@ impl<'a> TempDirectoryBuilder<'a> {
     /// nest.
     ///
     /// # Panics
-    /// Panics if `directory` was not returned by this builder, or if it does
-    /// not designate an entry declared with `add_directory`.
+    /// Panics if `directory` was not returned by this builder, or does not
+    /// designate a directory. Also panics if an entry declared inside the
+    /// closure leaves `directory`, whether it stays inside the temporary
+    /// directory or not:
+    ///
+    /// ```rust,should_panic
+    /// use temp_dir_builder::TempDirectoryBuilder;
+    /// let mut builder = TempDirectoryBuilder::default();
+    /// let data = builder.add_directory("data");
+    /// builder.in_directory(&data, |builder| {
+    ///     builder.add_empty_file("../escaped");
+    /// });
+    /// ```
     ///
     /// # Examples
     ///
@@ -622,6 +633,14 @@ impl<'a> Entries<'a> {
     fn add(&mut self, path: impl AsRef<Path>, kind: Kind<'a>) -> EntryKey {
         let path = self.prefix.join(path);
         let key_path = path.clean().into_boxed_path();
+
+        assert!(
+            key_path.starts_with(&self.prefix),
+            "'{}' leaves the directory '{}' it is declared in",
+            key_path.display(),
+            self.prefix.display()
+        );
+
         let index = self.list.len();
 
         self.list.push(Entry {
@@ -762,8 +781,19 @@ impl<'a> TempDirectoryAdditions<'a> {
     /// exactly like any other key. `in_directory` calls can nest.
     ///
     /// # Panics
-    /// Panics if `directory` was not returned by these additions, or if it
-    /// does not designate an entry declared with `add_directory`.
+    /// Panics if `directory` was not returned by these additions, or does not
+    /// designate a directory. Also panics if an entry declared inside the
+    /// closure leaves `directory`, whether it stays inside the temporary
+    /// directory or not:
+    ///
+    /// ```rust,should_panic
+    /// use temp_dir_builder::TempDirectoryAdditions;
+    /// let mut additions = TempDirectoryAdditions::default();
+    /// let data = additions.add_directory("data");
+    /// additions.in_directory(&data, |additions| {
+    ///     additions.add_empty_file("../escaped");
+    /// });
+    /// ```
     pub fn in_directory<F, R>(&mut self, directory: &EntryKey, declare: F) -> R
     where
         F: FnOnce(&mut Self) -> R,
@@ -2235,6 +2265,54 @@ mod tests {
         builder.in_directory(&file, |builder| {
             builder.add_empty_file("never");
         });
+    }
+
+    #[test]
+    #[should_panic(expected = "leaves the directory 'd'")]
+    fn test_in_directory_cannot_be_escaped_with_a_parent_component() {
+        let mut builder = TempDirectoryBuilder::default();
+        let dir = builder.add_directory("d");
+
+        builder.in_directory(&dir, |builder| {
+            builder.add_empty_file("../escaped");
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "leaves the directory 'outer/inner'")]
+    fn test_nested_in_directory_cannot_be_escaped_into_the_outer_scope() {
+        let mut builder = TempDirectoryBuilder::default();
+        let outer = builder.add_directory("outer");
+
+        builder.in_directory(&outer, |builder| {
+            let inner = builder.add_directory("inner");
+            builder.in_directory(&inner, |builder| {
+                builder.add_empty_file("../sibling");
+            });
+        });
+    }
+
+    #[test]
+    fn test_in_directory_accepts_a_path_that_stays_inside_after_cleaning() {
+        let mut builder = TempDirectoryBuilder::default();
+        let dir = builder.add_directory("d");
+
+        let key = builder.in_directory(&dir, |builder| builder.add_empty_file("sub/../kept"));
+        let temp_dir = builder.build().unwrap();
+
+        assert_eq!(temp_dir.path_of(&key), temp_dir.join("d/kept"));
+        assert!(temp_dir.join("d/kept").is_file());
+    }
+
+    #[test]
+    fn test_a_parent_component_at_the_root_is_still_an_entry_outside_directory() {
+        let mut builder = TempDirectoryBuilder::default();
+        builder.add_empty_file("../escaped");
+
+        assert!(matches!(
+            builder.build().unwrap_err(),
+            BuildError::EntryOutsideDirectory(_)
+        ));
     }
 
     #[test]
