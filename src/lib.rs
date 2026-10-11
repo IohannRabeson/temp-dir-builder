@@ -126,6 +126,8 @@ pub enum BuildError {
     EmptyEntryName(usize),
     #[error("The entry '{0}' is already existing")]
     DuplicateEntry(PathBuf),
+    #[error("Cannot create an entry inside '{0}': it is an existing symlink")]
+    ImplicitParentIsSymlink(PathBuf),
     #[error("Failed to set permissions on '{0}': {1}")]
     FailedToSetPermissions(PathBuf, std::io::Error),
     #[error("Failed to create symlink '{0}': {1}")]
@@ -963,6 +965,11 @@ impl<'a> TempDirectoryAdditions<'a> {
     /// symlink, is `DuplicateEntry`. Anything present and not declared is
     /// left untouched.
     ///
+    /// A directory an entry needs as a parent must not already exist as a
+    /// symlink, whatever it points at: such an entry is
+    /// `ImplicitParentIsSymlink` instead of a write through the link, which
+    /// would land outside `directory`.
+    ///
     /// Every entry is checked against the rule above before anything is
     /// created or overwritten, so a `DuplicateEntry` from one entry never
     /// leaves an earlier entry's target mutated.
@@ -1031,7 +1038,17 @@ fn build_entries(
             if ancestor == root || !ancestor.starts_with(root) {
                 break;
             }
-            created_directories.insert(ancestor.to_path_buf());
+
+            if !created_directories.insert(ancestor.to_path_buf()) {
+                continue;
+            }
+
+            let is_symlink = std::fs::symlink_metadata(ancestor)
+                .is_ok_and(|metadata| metadata.file_type().is_symlink());
+
+            if is_symlink {
+                return Err(BuildError::ImplicitParentIsSymlink(ancestor.to_path_buf()));
+            }
         }
     }
 
@@ -2674,6 +2691,72 @@ mod tests {
         let error = additions.build_into(&temp_dir).unwrap_err();
 
         assert!(matches!(error, BuildError::DuplicateEntry(_)));
+    }
+
+    #[test]
+    fn test_build_into_entry_under_an_existing_symlink_is_rejected() {
+        let mut outside_builder = TempDirectoryBuilder::default();
+        outside_builder.add_text_file("victim.txt", "original");
+        let outside = outside_builder.build().unwrap();
+
+        let mut builder = TempDirectoryBuilder::default();
+        builder.add_symlink("escape", outside.path());
+        let temp_dir = builder.build().unwrap();
+
+        let mut additions = TempDirectoryAdditions::default();
+        additions.add_empty_file("before.txt");
+        additions.add_text_file("escape/victim.txt", "clobbered");
+        let error = additions.build_into(&temp_dir).unwrap_err();
+
+        assert!(
+            matches!(error, BuildError::ImplicitParentIsSymlink(_)),
+            "got {error:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(outside.join("victim.txt")).unwrap(),
+            "original"
+        );
+        assert!(!temp_dir.join("before.txt").exists());
+    }
+
+    #[test]
+    fn test_build_into_entry_deeper_under_an_existing_symlink_is_rejected() {
+        let outside = TempDirectoryBuilder::default().build().unwrap();
+
+        let mut builder = TempDirectoryBuilder::default();
+        builder.add_symlink("escape", outside.path());
+        let temp_dir = builder.build().unwrap();
+
+        let mut additions = TempDirectoryAdditions::default();
+        additions.add_text_file("escape/deeper/victim.txt", "clobbered");
+        let error = additions.build_into(&temp_dir).unwrap_err();
+
+        assert!(
+            matches!(error, BuildError::ImplicitParentIsSymlink(_)),
+            "got {error:?}"
+        );
+        assert!(!outside.join("deeper").exists());
+    }
+
+    #[test]
+    fn test_entry_under_an_existing_symlink_in_a_fixed_root_is_rejected() {
+        let outside = TempDirectoryBuilder::default().build().unwrap();
+
+        let mut existing_builder = TempDirectoryBuilder::default();
+        existing_builder.add_symlink("escape", outside.path());
+        let existing = existing_builder.build().unwrap();
+
+        let mut builder = TempDirectoryBuilder::default();
+        builder.root_folder(existing.path());
+        builder.delete_on_drop(false);
+        builder.add_text_file("escape/new.txt", "clobbered");
+        let error = builder.build().unwrap_err();
+
+        assert!(
+            matches!(error, BuildError::ImplicitParentIsSymlink(_)),
+            "got {error:?}"
+        );
+        assert!(!outside.join("new.txt").exists());
     }
 
     #[test]
