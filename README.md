@@ -219,6 +219,11 @@ other collision, including a kind mismatch or an existing symlink, fails with
 path is still caught; a typo that lands on a same-shaped pre-existing entry is
 not, and is overwritten. Anything present and not declared is left untouched.
 
+A directory an entry needs as a parent must not already exist as a symlink,
+whatever it points at: such an entry fails with `ImplicitParentIsSymlink`
+instead of being written through the link, which would land outside the
+temporary directory.
+
 Every entry is checked against that rule before anything is created, so a
 `DuplicateEntry` from one entry never leaves an earlier entry's target
 mutated.
