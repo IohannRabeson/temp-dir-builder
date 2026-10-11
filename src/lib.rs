@@ -1043,10 +1043,9 @@ fn build_entries(
                 continue;
             }
 
-            let is_symlink = std::fs::symlink_metadata(ancestor)
-                .is_ok_and(|metadata| metadata.file_type().is_symlink());
-
-            if is_symlink {
+            if let Ok(metadata) = std::fs::symlink_metadata(ancestor)
+                && metadata.file_type().is_symlink()
+            {
                 return Err(BuildError::ImplicitParentIsSymlink(ancestor.to_path_buf()));
             }
         }
@@ -1351,11 +1350,11 @@ fn make_deletable(path: &Path) {
 
     let _ = std::fs::set_permissions(path, permissions);
 
-    if file_type.is_dir() {
-        if let Ok(entries) = std::fs::read_dir(path) {
-            for entry in entries.flatten() {
-                make_deletable(&entry.path());
-            }
+    if file_type.is_dir()
+        && let Ok(entries) = std::fs::read_dir(path)
+    {
+        for entry in entries.flatten() {
+            make_deletable(&entry.path());
         }
     }
 }
