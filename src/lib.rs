@@ -83,6 +83,39 @@ impl TempDirectory {
     pub fn path_of(&self, key: &EntryKey) -> PathBuf {
         self.path.join(&key.path)
     }
+
+    /// Declares entries to create inside this directory, which already
+    /// exists.
+    ///
+    /// The additions returned know their root, so `path_of` resolves a key
+    /// without going back through the `TempDirectory` and `build` needs no
+    /// argument. Use `TempDirectoryAdditions::default` with `build_into`
+    /// instead when the tree has to be declared before the directory it goes
+    /// into is known.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    // <snip id="example-additions">
+    /// use temp_dir_builder::TempDirectoryBuilder;
+    /// let mut builder = TempDirectoryBuilder::default();
+    /// builder.add_directory("repository");
+    /// let temp_dir = builder.build().expect("create temp dir");
+    /// // git init, or anything else that needs the directory to exist
+    /// let mut additions = temp_dir.additions();
+    /// let gitignore = additions.add_text_file("repository/.gitignore", "*.log");
+    /// let gitignore_path = additions.path_of(&gitignore);
+    /// additions.build().expect("extend temp dir");
+    /// assert!(gitignore_path.is_file());
+    // </snip>
+    /// ```
+    #[must_use]
+    pub fn additions<'a>(&self) -> TempDirectoryAdditions<'a> {
+        TempDirectoryAdditions {
+            entries: Entries::default(),
+            root: Some(self.path.clone()),
+        }
+    }
 }
 
 impl AsRef<Path> for TempDirectory {
@@ -757,6 +790,7 @@ impl<'a> Entries<'a> {
 #[derive(Debug, Default)]
 pub struct TempDirectoryAdditions<'a> {
     entries: Entries<'a>,
+    root: Option<PathBuf>,
 }
 
 impl<'a> TempDirectoryAdditions<'a> {
@@ -1003,6 +1037,50 @@ impl<'a> TempDirectoryAdditions<'a> {
             &self.entries.list,
             CollisionPolicy::ReuseMatching,
         )
+    }
+
+    /// Resolves an `EntryKey` to the path of the entry it identifies.
+    ///
+    /// The path is known as soon as the entry is declared, so this can be
+    /// called before `build`.
+    ///
+    /// # Panics
+    /// Panics if these additions were not obtained from
+    /// `TempDirectory::additions`, since there is no root to resolve against.
+    /// Also panics if `key` was not returned by these additions.
+    #[must_use]
+    pub fn path_of(&self, key: &EntryKey) -> PathBuf {
+        self.entries.assert_owns(key);
+
+        self.root().join(&key.path)
+    }
+
+    /// Creates the declared entries inside the directory these additions came
+    /// from, with the collision rule described on `build_into`.
+    ///
+    /// # Panics
+    /// Panics if these additions were not obtained from
+    /// `TempDirectory::additions`, since there is no directory to build into.
+    ///
+    /// # Errors
+    /// A `BuildError` is returned in case of error.
+    pub fn build(&self) -> Result<(), BuildError> {
+        build_entries(
+            self.root(),
+            &self.entries.list,
+            CollisionPolicy::ReuseMatching,
+        )
+    }
+
+    fn root(&self) -> &Path {
+        let Some(root) = self.root.as_deref() else {
+            panic!(
+                "these additions have no root: obtain them from TempDirectory::additions, or use \
+                 build_into to name the directory"
+            )
+        };
+
+        root
     }
 }
 
@@ -2761,6 +2839,104 @@ mod tests {
             "got {error:?}"
         );
         assert!(!outside.join("new.txt").exists());
+    }
+
+    #[test]
+    fn test_additions_build_creates_the_entries_in_the_directory_it_came_from() {
+        let temp_dir = TempDirectoryBuilder::default().build().unwrap();
+
+        let mut additions = temp_dir.additions();
+        let nested = additions.add_text_file("a/b.txt", "content");
+        additions.build().unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(temp_dir.join("a/b.txt")).unwrap(),
+            "content"
+        );
+        assert_eq!(temp_dir.path_of(&nested), temp_dir.join("a/b.txt"));
+    }
+
+    #[test]
+    fn test_additions_path_of_resolves_before_build() {
+        let temp_dir = TempDirectoryBuilder::default().build().unwrap();
+
+        let mut additions = temp_dir.additions();
+        let key = additions.add_empty_file("a/b.txt");
+        let path = additions.path_of(&key);
+
+        assert_eq!(path, temp_dir.join("a/b.txt"));
+        assert!(!path.exists(), "path_of must not create anything");
+
+        additions.build().unwrap();
+
+        assert!(path.is_file());
+    }
+
+    #[test]
+    fn test_additions_path_of_agrees_with_the_directory() {
+        let temp_dir = TempDirectoryBuilder::default().build().unwrap();
+
+        let mut additions = temp_dir.additions();
+        let directory = additions.add_directory("repository");
+        let gitignore = additions.in_directory(&directory, |additions| {
+            additions.add_text_file(".gitignore", "*.log")
+        });
+
+        assert_eq!(additions.path_of(&gitignore), temp_dir.path_of(&gitignore));
+    }
+
+    #[test]
+    #[should_panic(expected = "these additions have no root")]
+    fn test_unbound_additions_build_panics() {
+        let mut additions = TempDirectoryAdditions::default();
+        additions.add_empty_file("a");
+        let _ = additions.build();
+    }
+
+    #[test]
+    #[should_panic(expected = "these additions have no root")]
+    fn test_unbound_additions_path_of_panics() {
+        let mut additions = TempDirectoryAdditions::default();
+        let key = additions.add_empty_file("a");
+        let _ = additions.path_of(&key);
+    }
+
+    #[test]
+    #[should_panic(expected = "does not belong to this builder")]
+    fn test_additions_path_of_rejects_a_foreign_key() {
+        let temp_dir = TempDirectoryBuilder::default().build().unwrap();
+        let mut other = TempDirectoryAdditions::default();
+        let foreign = other.add_empty_file("a");
+
+        let _ = temp_dir.additions().path_of(&foreign);
+    }
+
+    #[test]
+    fn test_additions_build_applies_the_collision_rule_of_build_into() {
+        let mut builder = TempDirectoryBuilder::default();
+        builder.add_text_file("a.txt", "original");
+        builder.add_directory("dir");
+        let temp_dir = builder.build().unwrap();
+
+        let mut additions = temp_dir.additions();
+        additions.add_text_file("a.txt", "replaced");
+        additions.add_directory("dir");
+        additions.build().unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(temp_dir.join("a.txt")).unwrap(),
+            "replaced"
+        );
+        assert!(temp_dir.join("dir").is_dir());
+
+        let mut additions = temp_dir.additions();
+        additions.add_directory("a.txt");
+        let error = additions.build().unwrap_err();
+
+        assert!(
+            matches!(error, BuildError::DuplicateEntry(_)),
+            "got {error:?}"
+        );
     }
 
     #[test]
