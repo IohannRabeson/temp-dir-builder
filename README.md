@@ -224,6 +224,11 @@ whatever it points at: such an entry fails with `ImplicitParentIsSymlink`
 instead of being written through the link, which would land outside the
 temporary directory.
 
+Only a symlink is caught that way. Nothing distinguishes a hard link from any
+other regular file, so a declared file landing on one rewrites the inode
+behind it, and the content changes under every other name that inode has,
+including names outside the temporary directory.
+
 Every entry is checked against that rule before anything is created, so a
 `DuplicateEntry` from one entry never leaves an earlier entry's target
 mutated.
