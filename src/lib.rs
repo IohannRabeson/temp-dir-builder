@@ -970,6 +970,11 @@ impl<'a> TempDirectoryAdditions<'a> {
     /// `ImplicitParentIsSymlink` instead of a write through the link, which
     /// would land outside `directory`.
     ///
+    /// Only a symlink is caught that way. Nothing distinguishes a hard link
+    /// from any other regular file, so a declared file landing on one
+    /// rewrites the inode behind it, and the content changes under every
+    /// other name that inode has, including names outside `directory`.
+    ///
     /// Every entry is checked against the rule above before anything is
     /// created or overwritten, so a `DuplicateEntry` from one entry never
     /// leaves an earlier entry's target mutated.
