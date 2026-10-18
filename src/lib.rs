@@ -2405,17 +2405,25 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "leaves the directory 'outer/inner'")]
     fn test_nested_in_directory_cannot_be_escaped_into_the_outer_scope() {
         let mut builder = TempDirectoryBuilder::default();
         let outer = builder.add_directory("outer");
 
-        builder.in_directory(&outer, |builder| {
-            let inner = builder.add_directory("inner");
-            builder.in_directory(&inner, |builder| {
-                builder.add_empty_file("../sibling");
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            builder.in_directory(&outer, |builder| {
+                let inner = builder.add_directory("inner");
+                builder.in_directory(&inner, |builder| {
+                    builder.add_empty_file("../sibling");
+                });
             });
-        });
+        }));
+
+        let error = result.unwrap_err();
+        let message = error.downcast_ref::<String>().unwrap();
+        assert!(message.contains("leaves the directory"));
+        assert!(message.ends_with("it is declared in"));
+        assert!(message.contains("outer"));
+        assert!(message.contains("inner"));
     }
 
     #[test]
