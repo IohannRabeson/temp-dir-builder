@@ -1495,7 +1495,7 @@ fn create_or_validate_fixed_root(root: &Path) -> Result<(), BuildError> {
     }
 }
 
-const MAX_RANDOM_DIRECTORY_ATTEMPTS: u32 = 100;
+const MAX_RANDOM_DIRECTORY_ATTEMPTS: u32 = 10;
 
 fn create_random_temp_directory(base: &Path) -> Result<PathBuf, BuildError> {
     std::fs::create_dir_all(base)
